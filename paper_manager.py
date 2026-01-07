@@ -4,7 +4,6 @@ Paper Management System
 用于上传和记录论文的工具
 """
 
-import os
 import json
 import shutil
 import hashlib
@@ -31,14 +30,27 @@ class PaperManager:
     def _load_records(self):
         """加载论文记录"""
         if self.records_file.exists():
-            with open(self.records_file, 'r', encoding='utf-8') as f:
-                return json.load(f)
+            try:
+                with open(self.records_file, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except (json.JSONDecodeError, IOError) as e:
+                print(f"警告: 无法加载记录文件: {e}")
+                print("将创建新的记录文件")
+                return []
         return []
     
     def _save_records(self):
         """保存论文记录"""
-        with open(self.records_file, 'w', encoding='utf-8') as f:
-            json.dump(self.papers, f, ensure_ascii=False, indent=2)
+        try:
+            # 先写入临时文件，确保完整性
+            temp_file = self.records_file.with_suffix('.tmp')
+            with open(temp_file, 'w', encoding='utf-8') as f:
+                json.dump(self.papers, f, ensure_ascii=False, indent=2)
+            # 成功后替换原文件
+            temp_file.replace(self.records_file)
+        except IOError as e:
+            print(f"错误: 无法保存记录文件: {e}")
+            raise
     
     def _calculate_md5(self, filepath):
         """计算文件的MD5哈希值"""
@@ -76,8 +88,8 @@ class PaperManager:
                 print(f"警告: 该论文已存在 (ID: {paper['id']})")
                 return paper['id']
         
-        # 生成新的ID
-        paper_id = len(self.papers) + 1
+        # 生成新的ID (确保即使删除记录后也不会冲突)
+        paper_id = max([p['id'] for p in self.papers], default=0) + 1
         
         # 复制文件到papers目录
         file_extension = file_path.suffix
@@ -147,7 +159,7 @@ class PaperManager:
             if len(paper['authors']) > 2:
                 authors += f" 等 ({len(paper['authors'])}人)"
             authors = authors[:28] + '..' if len(authors) > 30 else authors
-            year = paper.get('year', 'N/A')
+            year = paper.get('year') or 'N/A'
             
             print(f"{paper_id:<5} {title:<40} {authors:<30} {year:<6}")
     
