@@ -1,0 +1,2277 @@
+# DipSVD: Dual-importance Protected SVD for Efficient LLM Compression
+
+**Xuan Ding¹, Rui Sun², Yunjian Zhang4,Xiu Yan⁵,Yueqi Zhou¹,**
+
+**Kaihao Huang¹,Suzhong**Fu2**,Chuanlong Xie 1,Yao Zhu³**
+
+¹Beijing Normal UJniversity,
+
+2TheChinese University of HongKong,Shenzhen,3Zhejiang University,
+
+{}4UIJniversity of Chinese Academyof Sciences, 5TsinghuaUniversity
+
+202322011119@mail.bnu.edu.cn,eezhuy@zju.edu.cn
+
+# Abstract
+
+The ever-increasing computational demands and deployment costs of large language models (LLMs) have spurred numerous compressing methods. Compared to quantization and un-structured pruning, SVD compression offers superior hardware compatibility and theoreti-cal guarantees. However, existing SVD-based methods focus on the overall discrepancy be-tween the original and compressed matrices while overlooking the protection of critical components withinthe matrix,which leads to inferior performance in the compressed mod-els. This paper proposes a dual-level impor-tance protection mechanism to enhance SVD-based compression methods: (1) local impor-tance protection: preserving the most criti-cal singular vectors within each weight matrix through channel-weighted data whitening;and (2)global importance protection: enabling less important layers to bear a greater portion of the compression burden through either a heuristic or optimization-based approach, thereby min-imizing the impact of compression on criti-cal layers. Extensive experiments demonstrate that DipSVD outperforms existing SVD-based compression approaches across multiple bench-marks, achieving superior model performance especially at high model compression ratios.
+
+# 1 Introduction
+
+While Large Language Models (LLMs) demon-strate remarkable capabilities across diverse natural language tasks such as multi-round conversation (Chen et al1., 2023;Long, 2023) and logical rea-soning (Creswell et al., 2022; Duan et al., 2024; Pan et al., 2023), the ever-increasing model scales impose severe computational burdens (Zhou et al., 2024; Wang et al., 2024a). This has spurred in-tensive research into LLM-specific compression techniques, including quantization (Frantar et al., 2022; Lin et al., 2024), parameter pruning (Men et al., 2024; Ma et al., 2023; Kim et al., 2024;Song
+
+<table border="1" ><tr>
+<td>Method</td>
+<td>Local Importance</td>
+<td>Global Importance</td>
+<td>Coupling Modeling</td>
+</tr><tr>
+<td>FWSVD</td>
+<td>Row-wise Deer weighting</td>
+<td>x</td>
+<td>x</td>
+</tr><tr>
+<td>ASVD</td>
+<td>x</td>
+<td>✓Sensity-based Truncation Rank Searching</td>
+<td> X</td>
+</tr><tr>
+<td>SVD-LLM</td>
+<td> X</td>
+<td>X</td>
+<td>x</td>
+</tr><tr>
+<td>Ours</td>
+<td colspan="2">✓Channel-weighted Duta Whitening✓Layer-Specific Compression</td>
+<td>✓Cross-Hierarchy Joiat Optimization</td>
+</tr></table>
+
+Table 1: Comparison of existing SVD-based methods.
+
+et al., 2024; Ding et al., 2025), and knowledge dis-tillation (Gu et al., 2023; Hsieh et al., 2023).While quantization and pruning require specialized hard-ware support and costly retraining, low-rank de-composition methods like Singular Value Decom-position (SVD) offer hardware-agnostic compres-sion through dense matrix operations.Moreover, the KV cache of LLMs compressed via SVD at runtime can also be reduced (Wang et al., 2024b).
+
+Despite these advantages, existing SVD-based compression methods are undermined by their fail-ure to holistically consider both **local importance** (e.g., intra-layer channel sensitivity) and **global** **importance** (e.g., layer-wise heterogeneity) dur-ing matrix factorization (as shown in Tab.1):(1) Globally-aware methods like ASVD (Yuan et al., 2023) dynamically allocate compression ratios across layers but retain standard SVD decompo-sition within each layer,risking excessive pruning of sensitive local features. (2) Locally-aware meth-ods such as FWSVD (Hsu et al., 2022)weight intra-layer channels but ignore global disparities. In LLMs, where layers with same structure have different roles (Zhang et al., 2024), uniform com-pression across these heterogeneous layers leads to suboptimal efficiency. (3) Isotropic methods including SVD-LLM (Wang et al., 2024b) ap-ply homogeneous compression without importance weighting at either level and inevitably degrade the performance-efficiency trade-offs. Critically,no existing work jointly optimizes global and local importance during SVD decomposition-a gap we empirically prove to be detrimental under aggres-sive compression.
+
+In this paper, we propose DipSVD, a Dual-importance protected SVD-based compression method. Specifically, our approach introduces: (1) Local Importance Protection: By employing channel-weighted data whitening, this method pre-serves the most importance singular vectors in the weight matrix, while allowing less important sin-gular vectors to bear a greater portion of the com-pression burden. (2) Global Importance Protection: Through either an optimization-based approach1 or a heuristic method derived from layer-wise gradient sensitivity analysis, we automatically determine the optimal layer-specific compression ratios, thereby protecting the most critical layers of the model and allocating more compression burden to less impor-tance layers. Through Pearson correlation analy-sis,we verify that the heuristic compression ratios closely align with those obtained from Bayesian optimization, while simultaneously reducing com-putation overhead.
+
+<!-- S707unfSI0Tsol IAESS07.90sCAAIXT -->
+
+We conduct extensive experiments to evaluate the effectiveness of our DipSVD method, bench-marking against three SVD-based compression methods across five LLMs of varying architectures and scales. Our evaluation encompasses both zero-shot task performance and perplexity metrics under identical experimental conditions. Experimental results demonstrate the superiority of DipSVD in terms of both zero-shot task performance and gen-eration quality. Additionally, our ablation studies show that with one of the two key components of DipSVD alone, it still outperforms state-of-the-art SVD-based compression methods under different compression ratios.
+
+The contributions of this study are summarized as:
+
+·We propose DipSVD, a novel compression framework for LLMs that explicitly integrates both local and global importance into the SVD process, aiming to preserve model integrity and task performance.
+
+·To implement this framework, we (i) intro-duce an importance-aware whitening mecha-nism to efficiently estimate compression loss while emphasizing local importance, and(ii) develop two strategies for global importance modeling: a high-performance Bayesian opti-mization method and a lightweight heuristic-based alternative.
+
+·Extensive experiments demonstrate that DipSVD effectively improves on-device in-ference efficiency while maintaining superior performance across seven diverse zero-shot tasks and perplexity benchmarks.
+
+# 2 Related Work
+
+## 2.1 Large Language MIodel Compression
+
+To mitigate the computational and memory de-mands of LLMs, researchers have proposed mul-tiple compression techniques such as quantiza-tion,unstructured pruning, structured pruning and knowledge distillation. Although these methods have demonstrated practical effectiveness,each has its own limitations. Quantized methods like GPTQ (Frantar et al., 2022), AWQ (Lin et al., 2024), and SmoothQuant (Xiao et al., 2023) enable low-bit inference but often sacrifice accuracy or hard-ware efficiency. Unstructured pruning methods like SparseGPT (Frantar and Alistarh, 2023), Wanda (Sun et al., 2023) and GBLM-Pruner (Das et al., 2023) can remove 50-75% of weights with reason-able accuracy, though their practical speedups on general-purpose hardware remain limited. While structured pruning methods (Chen et al., 2021; Ma et al., 2023; An et al., 2024) achieve hardware ac-celeration through removing entire architectural components, they suffer from substantial accuracy loss under aggressive pruning. Recent knowledge distillation methods such as GKD (Agarwal et al., 2023) and DistiLLM (Ko et al., 2024) compress auto-regressive modeIs into smaller students, but require substantial computation and retraining. Un-like these methods, low-rank approximation based on Singular Value Decomposition (SVD) offers an efficient alternative, requiring no retraining while maintaining hardwvare compatibility.
+
+## 2.2 Low-rank Decomposition
+
+SVD compression is a widely used technique to reduce matrix size by decomposing the weight ma-trix and truncating smaller singular values (Kim et al., 2015). Specifically, FWSVD (Hsu et al., 2022) incorporates Fisher information to prioritize important parameters, better maintaining predic-tion accuracy. ASVD (Yuan et al., 2023) scales the weight matrix based on activation distributions and adjusts the compression ratio layer-wise, allowing performance preservation at mnoderate compression ratios without retraining. SVD-LLM (Wang et al., 2024b) introduces truncation-aware data whiten-ing and closed-form layer-wise parameter updates,
+
+<!-- Prediction Prediction Layer Whitening Whitenning Matrix Transformer Layer Transformer Layer SVD Low-Rank Approximation SVD Decompostion Weight SVD& Trunc. Weight Transformer Layer Transformer Layer Activation Covariance Matrix Importance Transformer Layer Transformer Layer Quantification Layer-Specific Compression Ratios Input Activation Input Text Input Text Original LLM Bayes Optimization Heuristic-based approach Compressed LLM -->
+![](./images/05ac1895ed944aa2.jpg)
+
+Figure 1: Overview of DipSVD.
+
+significantly improving the balance between1 com-pression efficacy and inference speed.
+
+However, existing SVD-based methods typically neglect both global and local importance consider-ations in model architecture. The failure to account for global importance, as evidenced by varying layer-wise compression sensitivity, leads to subop-timal rank selection and significant performance degradation under high compression ratios (Ding et al., 2025). Concurrently, ignoring local impor-tance, manifested through unequal channel contri-butions to model outputs, may inadvertently prune structurally critical channels and cause substantial accuracy deterioration.
+
+# 3 Method
+
+Fig.1 provides an overview of DipSVD.Follow-ing the standard procedure of post-training LLM compression methods, DipSVD first uses a ran-dom set of sentences as calibration data to gener-ate activation for local importance protection and layer whitening. Specifically, DipSVD selectively emphasize important channels in the whitening transformation, which not only ensures a direct mapping between singular values and compression loss, but also improves structural retention during compression. To preserve global importance of LLMs, DipSVD groups the weight matrices across by Transformer layer in the original LLM. For each Transformer layer, DipSVD assigns a unique compression ratio which computed through Bayes Optimization or Heuristic-based approach. Lastly, DipSVD applies the layer-specific compression ra-tios to the weight matrix and performs SVD to truncate the weight matrices to compress the LLM. The following subsections provide a detailed de-scription of each protection method and their syn-ergistic integration. Pseudocode is provided in Ap-pendix.A.
+
+## 3.1 Local Importance Protection
+
+### 3.1.1 Channel-weighted Whitening
+
+To preserve structurally important channels during whitening, we propose an importance-aware trans-formation that adapts to the second-order statistics of the input.LetX∈Rm×denote a data matrix with m samples and n feature channels.
+
+We assess the structural importance of each chan-nel by evaluating how much it contributes to the overall sample-level second-order structure. Specif-ically, for the j-th feature channelxj=X:j∈Rm we define its importance as:
+
+$$α_{j}=\sqrt {x_{j}^{T}\left(XX^{T}\right)x_{j}}\tag{1}$$
+
+Channels with largerαjvalues are considered more significant, as they exert a stronger influence on the global sample structure encoded inXXT.Geomet-rically,this expression can be viewed as the magni-tude of the projection of channel vectorxjonto the principal subspace spanned by the data samples. In other words,αj2reflects how well the directionxj aligns with the dominant variance structure in the sample space. Channels with high alignment are thus deemed structurally important and are priori-tized for preservation in the subsequent whitening step.
+
+To enhance the preservation of such channels during whitening, we introduce a diagonal scaling matrixD∈Rn×n,defined by:
+
+$D_{jj}=\left\{\begin{array}{ll}a,&\text {if}α_{j}\text {is}\\ 1,&\text {otherw}\end{array}\right.$ among the top p% values, is
+
+(2)
+
+witha&gt;1. This results in a reweighted input $\tilde {X}=XD$ ,where structurally important channels are selectively amplified.
+
+As a preparatory step for whitening, we compute the second-order structure of $\tilde {X}$  through the matrix product:
+
+$$\tilde {X}^{T}\tilde {X}=D^{T}X^{T}XD\tag{3}$$
+
+Applying singular value decomposition,we express this matrix as $\tilde {X}^{T}\tilde {X}=U_{\tilde {X}}Σ_{\tilde {X}}U_{\tilde {X}}^{T}$ ,where $U_{\tilde {X}}\in$ Rn×nis orthogonal and $Σ_{\tilde {X}}$ is diagonal with non-negative entries. We then construct the whitening matrix:
+
+$$S=Σ_{\tilde {X}}^{-1/2}U_{\tilde {X}}^{T},\tag{4}$$
+
+which yields the final whitened output as $\hat {X}=$ $\tilde {X}S=XDS.$ This process results in decorrelated, variance-normalized features, while maintaining the structural contributions of high-importance channels identified through the original covariance.
+
+### 3.1.2 Impact of Whiteningon Truncation
+
+The channel-weighted whitening operation ampli-fies the contributions of important channels while ensuring that the compression loss is directlyre-lated to the singular values of the weight matrix, which is critical for minimizing the performance degradation caused by compression. In the follow-ing, we provide a theoretical derivation explaining why the whitening process guarantees a direct map-ping between singular values and compression loss.
+
+**Singular Value Decomposition of Whitened** **Weight** **Matrix.** We first perform SVD on the whitened weight matrix W S to obtain its decom-position:
+
+$$WS=UΣV^{T}=\sum _{i=1}^{r}σ_{i}u_{i}v_{i}^{T}\tag{5}$$
+
+where:U=[u1,u2,⋯,ur]contains the left sin-gular vectorsui∈Rn,Σ=diag(σ1,σ2,⋯,σr) contains the singular values in descending order, V=[v1,v2,⋯,v]contains the right singular vec-torsvi∈Rm,r is the rank of WS.
+
+**Single Singular Value Truncation.** When trun-cating the i-th singular value σiof WS,the com-pression lossLiis given by:
+
+$$L_{i}=\left\|W\tilde {X}-W^{\prime }\tilde {X}\right\|_{F}$$
+
+$$=\left\|(WS-\text {SVD}(WS))S^{-1}\tilde {X}\right\|_{F}\tag{6}$$
+
+$$=\left\|σ_{i}u_{i}v_{i}^{T}S^{-1}\tilde {X}\right\|_{F}$$
+
+Leveraging the orthonormality ofui andvi (i.e.,.uiTui=viTvi=1),the whitening property $S^{-1}\tilde {X}\tilde {X}^{T}\left(S^{-1}\right)^{T}=I$ ,and the invariance of the Frobenius norm under orthogonal transformations, we obtain:
+
+$$L_{i}=σ_{i}\left[\text {trace}\left(v_{i}^{T}S^{-1}\tilde {X}\tilde {X}^{T}\left(S^{-1}\right)^{T}v_{i}\right)\right]^{1/2}\quad =σ_{i}\left[v_{i}^{T}·I·v_{i}\right]^{1/2}=σ_{i}\tag{7}$$
+
+This shows that truncating a singlesingular value results in a compression loss equal to that singular value.
+
+**Multiple Singular Value Truncation.** When truncating the smallest-msingular values {σm+1,⋯,σr}of WS the total compression loss is defined as the output difference on input $\tilde {X}:$ 
+
+$$L=\left\|\sum _{i=m+1}^{r}σ_{i}u_{i}v_{i}^{T}S^{-1}\tilde {X}\right\|_{F}=\sqrt {\sum _{i=m+1}^{r}σ_{i}^{2}}\tag{8}$$
+
+In summary, truncating smaller singular values minimizes both the compression loss and approxi-mation error, where the total impact is determined by the root-sum-square of the truncated singular values.The whitening operation ensures this direct correspondence between singular values and model performance.
+
+## 3.2 Global Importance Protection
+
+While local importance protection effectively pre-serves critical channels within individual layers, a key challenge lies in ensuring that globally im-portant layers are also adequately protected. To this end, we propose two compression strategies based on global layer-wise importance, which allo-cate different compression ratios to different layers according to their relative significance.
+
+### 3.2.1 Bayesian Optimization for
+
+### Layer-Specific Compression
+
+For scenarios where computational resources are abundant and the highest possible performance is desired, Bayesian optimization can be employed to directly optimize the global compression ob-jective. This approach searches for the optimal compression ratios by maximizing the cosine simi-larity between the outputs of the original and com-pressed models, subject to the global compression constraint:
+
+$$\max _{k_{1},k_{2},\cdots ,k_{L}}\text {cosine_{similarity}}\left(f_{\text {orig}}(x),f_{\text {comp}}(x)\right)\quad =\frac {1}{L}\sum _{l=1}^{L}k_{l}=k/\tag{9}$$
+
+where kli are layer compression ratios,L is total layers, and k is the target global compression ratio.
+
+### 3.2.2 Efficient Heuristic for Layer-Specific Compression
+
+While Bayesian optimization offers superior perfor-mance, it is computationally expensive and may not be necessary for all applications. A practical and efficient alternative is provided by a heuristic-based approach that combines two key metrics: Fisher Sensitivity and Effective Rank. These metrics pro-vide complementary insights into the importance and compressibility of each layer, enabling a cost-effective yet principled compression strategy.
+
+**Fisher** **Sensitivity.** Fisher Sensitivity measures how sensitive the model's loss is to changes in the parameters of each layer. It is computed as the ratio of the gradient norm to the parameter norm for each layer, capturing the relative importance of the layer's parameters. Specifically,for each layer l,Fisher Sensitivity can be formulated as:
+
+$$S_{l}=\sum _{\text {Attention}}\frac {\left\|\nabla _{\theta }\mathcal {L}\right\|_{F}}{\|\theta \|_{F}}+\sum _{\mathrm {MLP}}\frac {\left\|\nabla _{\theta }\mathcal {L}\right\|_{F}}{\|\theta \|_{F}}\tag{10}$$
+
+where∇θLis the gradient of the loss with respect to the parameters θ and\|·\|Fdenotes the Frobenius norm.
+
+**Effective** **Rank.** Effective Rank quantifies the information density of each layer's output by an-alyzing its singular value distribution. For each layer l, we compute the singular values of its out-put matrixHl∈RBxTxD(where B is the batch size,T is the sequence length, and D is the hidden dimension) and determine the smallest rankRlthat captures a predefined threshold (e.g.,95%) of the cumulative energy:
+
+$$R_{l}=\min \left\{k|\frac {\sum _{i=1}^{k}σ_{i}}{\sum _{i=1}^{r}σ_{i}}\geq \text {threshold}\right\}\tag{11}$$
+
+whereσi are the singular values of Hl.
+
+**Combining Sensitivity and Effective Rank.** Layers with higher sensitivity values are more crit-ical to the model's performance and should be pre-served more aggressively. Similarly, layers with lower effective ranks are more compressible and can tolerate higher compression. To assign com-pression ratios to each layer, we first combine the Fisher SensitivitySland Effective RankRlinto a unified importance score Ql:
+
+$$Q_{l}=\left(S_{l}\right)^{\beta }·\left(R_{l}\right)^{1-\beta },\tag{12}$$
+
+where β is a hyperparameter that controls the rela-tive importance of sensitivity and effective rank.
+
+Given normalized importance scores Ql for each layer and a target global compression ratio k, we define the per-layer preservation ratios plt (i.e., the proportion of parameters retained in each layer) such that the average preservation ratio across all layers equals 1-k. The preservation ratios are computed as:
+
+$$p_{l}=\frac {Q_{l}}{\sum _{j=1}^{L}Q_{j}}·L·(1-k)\tag{13}$$
+
+The corresponding compression ratios are then given by1-pl.This formulation ensures that layerswithhigherimportancescoresQl are com-pressed less aggressively, while maintaining the desired global compression budget. As shown in Fig.2, by capturing both the sensitivity trendsSl and compressibility patternsRl,the derived preser-vation ratios clearly reflect each layer's relative contribution to model performance.
+
+<!-- Layer-wise Sensitivity and Pruning Analysis 20 Fisher Sensitivity Effective Rank 15 Preservation Ratio AINRISuaS AuSL 10 XUeL aNeE 5 OeH UogeNased 0.9 007 0 4 8 12 16 20 24 28 32 Layer Index -->
+![](./images/d4a58c8d67f753f4.jpg)
+
+Figure 2: TheQl,Sl,andRlvalues for each layer in Vicuna-7B at 20% compression ratio.
+
+## 3.3 Integrated Compression Process
+
+DipSVD incorporates local and global significance protection mechanisms into compression:
+
+**Step 1: Layer Whitening.** For each layer, per-form data whitening using the matrix $\tilde {X}^{T}\tilde {X}$ and SVD, as described in Sec.3.1.1.
+
+**Step 2: Layer-Specific Compression Ratios.** Use Bayesian optimization (or the heuristic-based approach) to determine the optimal compression ratiosk1,k2,⋯,kLfor each layer, as described in Sec.3.2.
+
+**Step 3: SVD Low-Rank Approximation.** For each layer l, apply the compression ratio kli to the weight matrixWlusing SVD-based low-rank ap-proximation:
+
+1) Perform SVD on the whitened weight matrix WlS:
+
+$$W_{l}S=U_{l}Σ_{l}V_{l}^{T}\tag{12}$$
+
+<table border="1" ><tr>
+<td>Model</td>
+<td>Method</td>
+<td>WikiText-2</td>
+<td>PTB</td>
+<td>C4</td>
+<td>Openb.</td>
+<td>ARCe</td>
+<td>WinoG.</td>
+<td> HellaS.</td>
+<td>ARCc</td>
+<td>PIQA</td>
+<td>MathQA</td>
+<td>Average</td>
+</tr><tr>
+<td rowspan="4">LLaMA-7B</td>
+<td>ASVD</td>
+<td>95.268</td>
+<td>200.937</td>
+<td>86.269</td>
+<td>0.186</td>
+<td>0.379</td>
+<td>0.557</td>
+<td>0.333</td>
+<td>0.242</td>
+<td>0.607</td>
+<td>0.218</td>
+<td>0.360</td>
+</tr><tr>
+<td>FWSVD</td>
+<td>33.001</td>
+<td>53.587</td>
+<td>38.240</td>
+<td>0.186</td>
+<td>0.507</td>
+<td>0.572</td>
+<td>0.343</td>
+<td>0.242</td>
+<td>0.632</td>
+<td>0.217</td>
+<td>0.386</td>
+</tr><tr>
+<td>SVD-LLM</td>
+<td>9.526</td>
+<td>28.967</td>
+<td>26.390</td>
+<td>0.242</td>
+<td>0.509</td>
+<td>0.570</td>
+<td>0.352</td>
+<td>0.269</td>
+<td>0.630</td>
+<td>0.227</td>
+<td>0.400</td>
+</tr><tr>
+<td>Ours</td>
+<td>9.427</td>
+<td>22.270</td>
+<td>19.909</td>
+<td>0.242</td>
+<td>0.602</td>
+<td>0.640</td>
+<td>0.405</td>
+<td>0.296</td>
+<td>0.661</td>
+<td>0.230</td>
+<td>0.440</td>
+</tr><tr>
+<td rowspan="4">Vicuna-7B</td>
+<td>ASVD</td>
+<td>91.388</td>
+<td>415.615</td>
+<td>136.157</td>
+<td>0.158</td>
+<td>0.335</td>
+<td>0.503</td>
+<td>0.287</td>
+<td>0.208</td>
+<td>0.556</td>
+<td>0.205</td>
+<td>0.322</td>
+</tr><tr>
+<td>FWSVD</td>
+<td>43.690</td>
+<td>239.318</td>
+<td>64.753</td>
+<td>0.172</td>
+<td>0.459</td>
+<td>0.545</td>
+<td>0.312</td>
+<td>0.224</td>
+<td>0.613</td>
+<td>0.221</td>
+<td>0.364</td>
+</tr><tr>
+<td>SVD-LLM</td>
+<td>12.416</td>
+<td>124.506</td>
+<td>39.528</td>
+<td>0.244</td>
+<td>0.506</td>
+<td>0.570</td>
+<td>0.353</td>
+<td>0.270</td>
+<td>0.629</td>
+<td>0.228</td>
+<td>0.400</td>
+</tr><tr>
+<td>Ours</td>
+<td>12.144</td>
+<td>81.089</td>
+<td>28.837</td>
+<td>0.248</td>
+<td>0.573</td>
+<td>0.597</td>
+<td>0.384</td>
+<td>0.293</td>
+<td>0.659</td>
+<td>0.232</td>
+<td>0.427</td>
+</tr><tr>
+<td rowspan="4">DeepSeek-7B</td>
+<td>ASVD</td>
+<td>85.169</td>
+<td>87.709</td>
+<td>79.853</td>
+<td>0.154</td>
+<td>0.390</td>
+<td>0.516</td>
+<td>0.312</td>
+<td>0.213</td>
+<td>0.610</td>
+<td>0.210</td>
+<td>0.344</td>
+</tr><tr>
+<td>FWSVD</td>
+<td>68.416</td>
+<td>99.775</td>
+<td>118.319</td>
+<td>0.142</td>
+<td>0.406</td>
+<td>0.551</td>
+<td>0.296</td>
+<td>0.194</td>
+<td>0.595</td>
+<td>0.220</td>
+<td>0.344</td>
+</tr><tr>
+<td>SVD-LLM</td>
+<td>10.841</td>
+<td>30.747</td>
+<td>32.622</td>
+<td>0.260</td>
+<td>0.589</td>
+<td>0.609</td>
+<td>0.384</td>
+<td>0.283</td>
+<td>0.670</td>
+<td>0.232</td>
+<td>0.432</td>
+</tr><tr>
+<td>Ours</td>
+<td>9.895</td>
+<td>20.977</td>
+<td>22.558</td>
+<td>0.276</td>
+<td>0.628</td>
+<td>0.631</td>
+<td>0.415</td>
+<td>0.312</td>
+<td>0.700</td>
+<td>0.239</td>
+<td>0.457</td>
+</tr></table>
+
+Table 2: Performance of LLaMA-7B, Vicuna-7B and Deepseek-7B models compressed by DipSVD and baselines at 30% compression ratio, evaluated on three language modelingdatasets (measured by perplexity) and seven classification datasets (measured by average accuracy). The best performance for each case is marked in bold.
+
+whereUl∈Rn×randVl∈Rm×rare orthogonal matrices,andΣl∈Rr×ris a diagonal matrix con-taining the singular valuesσ1,σ2,⋯,σrofWlS.
+
+2) Truncate the smallest singular values inΣl based on kli, obtaining the truncated diagonal ma-trix Truunc*(Σl)
+
+3) Construct the compressed weight matrixWl′:
+
+$$W_{l}^{\prime }=U_{l}x\text {Trunc}_{*}\left(Σ_{l}\right)xV_{l}^{T}xS^{-1}\tag{13}$$
+
+4) To further reduce memory usage, replace the original weight matrixWlwith two low-rank ma-trices $W_{u,}\in \mathbb {R}^{n\times \tilde {r}}$ and $W_{v,l}\in \mathbb {R}^{\tilde {r}xm}:$ 
+
+$$W_{u,l}=U_{l}\times \left[\text {Trunc}_{*}\left(Σ_{l}\right)\right]^{1/2}\tag{14}$$
+
+$$W_{v,l}=\left[\text {Trunc}_{*}\left(Σ_{l}\right)\right]^{1/2}\times V_{l}^{T}\times S^{-1},\tag{15}$$
+
+where $\tilde {r}$ is the rank after truncation.
+
+# 4 Experiments
+
+## 4.1 Experimental setup
+
+**Foundation** **LLMs.** We conducted experiments on existing popular LLMs at various scales, including LLaMA-{7B, 13B} (Touvron et al., 2023), Vicuna-{7B,13B}-v1.5(Chiang et al., 2023) and Deepseek-7B (DeepSeek-AI et al.,2025).
+
+**Baselines.** We compared DipSVD with several previous SVD-based compression methods includ-ing FWSVD (Hsu et al., 2022),ASVD (Yuan et al., 2023) and SVD-LLM (Wang et al., 2024b).
+
+**Benchmarks.** We measure zero-shot accuracy on commonsense reasoning datasets (i.e.,PIQA (Bisk et al., 2020), HellaSwag (Zellers et al., 2019), WinoGrande (Sakaguchi et al., 2021),ARC-easy (Clark et al., 2018),ARC-challenge (Clark et al., 2018), MathQA(Amini et al., 2019) and Open-bookQA (Mihaylov et al., 2018a)) using the lm-evaluation-harness package (Gao et al., 2024). To assess sequence prediction performance, we re-port perplexity for DipSVD and the baselines on WikiText-2 (Merity et al., 2016), PTB (Marcus et al., 1993) and C4 (Mihaylov et al., 2018b).
+
+**Implementation Details.** To ensure a fair com-parison, we followed ASVD (Yuan et al., 2023) to randomly select 256 samples from WikiText-2as the calibration data. All of our experiments are conducted on NVIDIA A100 GPUs.
+
+## 4.2 Overall Performance
+
+We evaluate the overall performance of DipSVD from three aspects: (1) performance on differ-ent LLMs, (2) performance on LLMs with larger scales, (3) performance under different compres-sion ratios. Detailed results, contents generated by the compressed LLMs, and an analysis of the computational gains achieved by our method are provided in the Appendix.
+
+**Performance on different LLMs.** We first com-pare the zero-shot task performance and perplexity metrics between DipSVD and the baseline on three different LLMs, including LLaMA-7B, Vicuna-7B and DeepSeek-7B under 30% compression ratio. As shown in Tab.2, DipSVD consistently outper-forms the baselines across all three LLMs and alI ten datasets. Specifically, we achieve the low-est perplexity (9.427) on LLaMA-7B model.For downstream tasks, our method attains the highest average accuracy (0.457 vs. SVD-LLM's 0.432 on DeepSeek-7B), with notable gains on reasoning-heavy benchmarks like ARC-Challenge (+4.3%). These results collectively show that DipSVD ef-fectively reduces model size and complexity while better preserving model performance compared to existing methods. The consistent improvements across different model architectures further demon-strate the robustness and generalizability of our proposed method.
+
+<table border="1" ><tr>
+<td>Model</td>
+<td>Method</td>
+<td>WikiText-2</td>
+<td>PTB</td>
+<td>C4</td>
+<td>Average</td>
+</tr><tr>
+<td rowspan="4">LLaMA-13B</td>
+<td>ASVD</td>
+<td>17.648</td>
+<td>32.963</td>
+<td>20.866</td>
+<td>0.425</td>
+</tr><tr>
+<td>FWSVD</td>
+<td>12.963</td>
+<td>22.123</td>
+<td>18.509</td>
+<td>0.383</td>
+</tr><tr>
+<td>SVD-LLM</td>
+<td>7.618</td>
+<td>17.823</td>
+<td>18.825</td>
+<td>0.449</td>
+</tr><tr>
+<td>Ours</td>
+<td>7.697</td>
+<td>15.681</td>
+<td>14.614</td>
+<td>0.472</td>
+</tr><tr>
+<td rowspan="4">Vicuna-13B</td>
+<td>ASVD</td>
+<td>28.309</td>
+<td>637.196</td>
+<td>39.799</td>
+<td>0.401</td>
+</tr><tr>
+<td>FWSVD</td>
+<td>32.715</td>
+<td>310.304</td>
+<td>47.408</td>
+<td>0.383</td>
+</tr><tr>
+<td>SVD-LLM</td>
+<td>9.616</td>
+<td>145.715</td>
+<td>29.204</td>
+<td>0.449</td>
+</tr><tr>
+<td>Ours</td>
+<td>9.070</td>
+<td>49.948</td>
+<td>19.203</td>
+<td>0.458</td>
+</tr></table>
+
+Table 3: Perplexity on three language modeling datasets and average accuracy of seven datasets of LLaMA-13B and Vicuna-13B at 30% compression ratio.
+
+<!-- Model Performance Across Different Compression Ratios FWS ASV 11 Ours WikiText-2 0.48 Zero-shot Tasks 104 0.44 (eIe2s 6ol Axacad 103 103 0.40 AEJnCy 0.36 102 0.32 101 0.28 20 30 40 50 20 30 40 50 CompressionRatio(%) Compression Ratio(%) -->
+![](./images/f8effc8e87485a94.jpg)
+
+Figure 3: Perplexity on WikiText-2 and average zero-shot accuracy of Vicuna-7B compressed by DipSVD and baselines under 20% to 50% compression ratios.
+
+**Performance on LLMs with larger scales.We** compare the performance between DipSVD and the baselines on LLaMA-13B and Vicuna-13B un-der 30% compression ratio on ten datasets in Tab.3. Specifically, our DipSVD method reduce PTB per-plexity by 65.7% compared to SVD-LLM (49.948vs 145.715) for Vicuna-13B. The results demon-strate that our method effectively scales to LLMs while maintaining superior capability preservation compared to existing compression methods.
+
+**Performance under Different Compression** **Ratios.** We compare the performance between DipSVD and the baselines on Vicuna-7B un-der compression ratio ranging from 20% to 50% on WikiText-2 datasets and seven classification datasets. As shown in Fig.3, DipSVD consistently outperforms all baselines, and the performance gap gain with the compression ratio increases.
+
+## 4.3 Performance of heuristics method
+
+The heuristic method also serves as a key strat-egy for global importance preservation. Tab.4compares perplexity scores across SVD-LLM, Bayesian optimization method, and the heuris-tic method. The results demonstrate that the heuristic method (DipSVDH) significantly out-performs SVD-LLM across multiple compression ratios on all three datasets. While the Beyesian op-timization method (DipSVDB) achieves the best performance with large computational overheads, DipSVDH remains competitive while offering a practical trade-off between performance and effi-ciency.
+
+<table border="1" ><tr>
+<td>Compression Ratio</td>
+<td>Method</td>
+<td>WikiText2</td>
+<td>PTB</td>
+<td>C4</td>
+</tr><tr>
+<td rowspan="3">0.2</td>
+<td>SVD-LLM</td>
+<td>9.942</td>
+<td>71.366</td>
+<td>23.358</td>
+</tr><tr>
+<td>DipSVDB</td>
+<td>9.952</td>
+<td>56.869</td>
+<td>19.722</td>
+</tr><tr>
+<td>DipSVDH</td>
+<td>9.988</td>
+<td>54.380</td>
+<td>19.950</td>
+</tr><tr>
+<td rowspan="3">0.3</td>
+<td>SVD-LLM</td>
+<td>12.416</td>
+<td>124.506</td>
+<td>39.528</td>
+</tr><tr>
+<td>DipSVDB</td>
+<td>12.144</td>
+<td>81.089</td>
+<td>28.837</td>
+</tr><tr>
+<td>DipSVD</td>
+<td>12.378</td>
+<td>82.872</td>
+<td>30.748</td>
+</tr><tr>
+<td rowspan="3">0.4</td>
+<td>SVD-LLM</td>
+<td>18.346</td>
+<td>261.100</td>
+<td>77.706</td>
+</tr><tr>
+<td>DipSVDB</td>
+<td>17.085</td>
+<td>142.752</td>
+<td>49.183</td>
+</tr><tr>
+<td>DipSVDH</td>
+<td>17.290</td>
+<td>168.404</td>
+<td>54.794</td>
+</tr><tr>
+<td rowspan="3">0.5</td>
+<td>SVD-LLM</td>
+<td>35.569</td>
+<td>615.591</td>
+<td>185.780</td>
+</tr><tr>
+<td>DipSVDB</td>
+<td>27.807</td>
+<td>375.093</td>
+<td>111.996</td>
+</tr><tr>
+<td>DipSVDH</td>
+<td>30.180</td>
+<td>390.512</td>
+<td>118.873</td>
+</tr></table>
+
+Table 4: Heuristics result of compressed Vicuna-7B. DipSVDB represents compression model by Bayesian optimization method. DipSVDH represents compres-sion model by the heuristic method.
+
+**Connection with Bayesian optimization.** In the experiments, the heuristic method showed the strongest correlation with the optimization-based method whenβ=0.25.Therefore,we uniformly setβto 0.25. Tab.5 shows the Pearson correla-tion coefficient between the layer-wise compres-sion rates obtained by heuristic and Bayesian op-timization across different target compression ra-tios. The correlation coefficients consistently ex-ceed 0.64, indicating strong agreement between the two methods at all compression levels.
+
+<table border="1" ><tr>
+<td>Compression Ratio</td>
+<td>0.2</td>
+<td>0.3</td>
+<td>0.4</td>
+<td>0.5</td>
+</tr><tr>
+<td>Pearson Correlation Coefficient</td>
+<td>0.645</td>
+<td>0.669</td>
+<td>0.711</td>
+<td>0.706</td>
+</tr></table>
+
+Table 5: Pearson correlation coefficients between heuris-tic and Bayesian optimization methods across different compression ratios.
+
+## 4.4 Ablation Study
+
+### 4.4.1 Hyperparametric Ablation Experiment
+
+We conducted ablation experiments to evaluate the impact of two hyperparameters in DipSVD: weight (importance amplification factor) and bar (top channel selection ratio). The results are shown in Fig.4. First, we isolated the effect of weight by testing progressive values from 0 to 150 while fixing bar=0.03,revealing that higher weights intro-duce better performance as the parameters increase until it remains unchanged. Next, we analyzed bar with values from 0 to 0.3, demonstrating that the performance will be better and then worse as the parameters increase. The optimal performance of both DipSVD (Step1) and DipSVD(Step1+Step2) can be achieved when weight=30and bbar=0.03.
+
+Comparative Ablation Study of Step1 and Step2 Parameters
+
+Wikitext2 ptb Mean ---Reference
+
+<!-- 120 (a) Step1: Weight Ablation (bar=0.03) 100 8le % 40 20- 0.0- 20 40 60 80 100 120 140 ue -->
+![](./images/558dd7261278bd8b.jpg)
+
+<!-- (b) Step1:Bar Ablation (weight=30) 160- 140 当级 120- 100 2Ue 80 60 40- 20 0.0- 0.00 0.05 0.10 0.15 0.20 0.25 0.30 alue -->
+![](./images/9f48adaeceddf34f.jpg)
+
+<!-- (c) Step1+Step2: Weight Ablation (bar=0 on (bar=0.03) 100 00- enieA 60 40- 4 20- 0.0 20 40 60 80 100 120 140 Weight Value -->
+![](./images/f23bf8ec7739126a.jpg)
+
+(d) Step1+Step2:Bar Ablation (weight=30)
+
+<!-- 120- 100 enieA 본 80 60 40 20 0.0- 0.00 0.0 0 0.15 8 0.2 0.30 Bar Value -->
+![](./images/4e5eb3cf26d9b0f1.jpg)
+
+Figure 4: Parameter ablation studies: (a) Step1 weight ablation (bar=0.03), (b) Step1 bar ablation (weight=30),(c) Full DipSVD weight ablation(ba=0.03,(d) Full DipSVD bar ablation (weight=30). Dashed lines mark reference valus (weight=30,ba=003)
+
+### 4.4.2 Modular Sensitivity Study
+
+We conduct ablation studies to evaluate our DipSVD method by: (1) Isolating Step1 (local im-portance protection with uniform layer compres-sion ratios), (2) Isolating Step2 (global importance protection with uniform SVD compression) and (3) Combining Step1 and Step2 (full DipSVD). This comparison quantifies the impact of local impor-tance protection (Step1) and how global importance protection (Step2) enhances the base performance achieved by local compression (Step1).
+
+From Tab.6, we observe that: (1) Both DipSVD (Step1) and DipSVD (Step2) outperforms SVD-LLM on all datasets, confirming the effectiveness of our proposed local and global importance pro-tection; (2) The full DipSVD (Step1+Step2) fur-ther reduces perplexity substantially, demonstrating
+
+<table border="1" ><tr>
+<td>Method</td>
+<td>Hyper</td>
+<td>WikiText2</td>
+<td>PTB</td>
+<td>C4</td>
+</tr><tr>
+<td>Vanilla</td>
+<td>None</td>
+<td>6.7836</td>
+<td>30.853</td>
+<td>9.2064</td>
+</tr><tr>
+<td>SVD-LLM</td>
+<td>None</td>
+<td>12.4212</td>
+<td>124.6766</td>
+<td>39.5712</td>
+</tr><tr>
+<td>DipSVD (Step1)</td>
+<td>weight 30 bar 0.03</td>
+<td>12.2663</td>
+<td>97.2792</td>
+<td>34.2737</td>
+</tr><tr>
+<td>DipSVD (Step2)</td>
+<td>None</td>
+<td>12.1868</td>
+<td>94.9336</td>
+<td>31.7530</td>
+</tr><tr>
+<td>DipSVD (Step1+Step2)</td>
+<td>weight 30 bar 0.03</td>
+<td>12.1578</td>
+<td>80.6209</td>
+<td>28.8224</td>
+</tr></table>
+
+Table 6: Perplexity of compressed Vicuna-7B: DipSVD (Step1) preserves local importance only, DipSVD (Step2) preserves global importance only, while DipSVD Step1+Step2) preserves both aspects.
+
+<!-- Model Calibration Performance Analysis ■O-WT2 Line PTB Line C4 Line WT2 Bar PTB B C4 Bar (a) Context Analysis (b) Cross-Dataset 30.0 150 120- 9.0 27.5 2 24 107.3 25.0 -140 100- 22 135 D 4 00- 130 $\hat {\mathbf {c}}$ 0 M 17.5 -125 Perpl 60- 52.9 57.5 43.4 40- 15.0 120 19.8 23.5 17.4 12.5 20- 115 11.8 10.0 32 64 3 256 5i2 110 C4 PTB WT2 Context Size Dataset -->
+![](./images/b064cb60461db300.jpg)
+
+Figure 5: Ablation study of calibration datasets: (a) Perplexity with varying sizes of Wikitext2 calibration data, (b) Perplexity with different calibration datasets.
+
+the synergistic effect of combining both protection strategies in SVD compression.
+
+#### 4.4.3 Impact of Calibration Data.
+
+We examine the impact of calibration data used for channel-weighted data whitening.Fig.5 shows the performance of compressed Vicuna-7B when changing the choice and size of the calibration data. The results show that increased context size will improve the final performance of the compression model to a certain extent, and will work best when the test set is consistent with the calibration set.
+
+# 5 Conclusion
+
+In this paper, we propose DipSVD, a compression framework that jointly considers both local and global importance factors in large languge mod-els (LLMs) to achieve more efficient and balanced compression. Specifically, we introduce a channel-weighted data whitening technique to preserve the most critical singular vectors within each weight matrix and develop two strategies for determining layer-specific compression ratios, enabling less im-portant layers to absorb a greater portion of the compression burden. Extensive experiments across 10 datasets, 5 models from 3 LLM families,and 4compression scales consistently demonstrate that DipSVD achieves superior performance compared to existing SVD-based compression methods.
+
+## Limitations
+
+While DipSVD demonstrates strong performance across various models, datasets, and compression scales, several limitations remain.
+
+First, the channel-weighted data whitening pro-cedure employs a fixed amplification factor across all layers and channels, which may not optimally adapt to the varing statistical properties of different layers or channel distributions. A more dynamic or data-driven adjustment of the weighting factors could potentially further enhance compression per-formance.
+
+Second, the assignment of layer-wise compres-sion ratios in DipSVD relies on handcrafted impor-tance metrics based on Fisher sensitivity and ef-fective rank. While this design is computationally efficient and effective in practice, it may not fully capture complexinter-layer dependencies or fea-ture interactions. Developing more sophisticated global importance modeling techniques could po-tentially lead to further improvements.
+
+Nevertheless, despite these limitations, DipSVD consistently outperforms existing SVD-based com-pression methods across diverse evaluation settings, demonstrating its robustness and practical effective-ness.
+
+# References
+
+Rishabh Agarwal, Nino Vieillard, Piotr Stanczyk, Sabela Ramos, Matthieu Geist, and Olivier Bachem. 2023.Gkd: Generalized knowledge distillationfor auto-regressive sequence models. CoRR.
+
+Aida Amini, Saadia Gabriel, Peter Lin, Rik Koncel-Kedziorski, Yejin Choi, and Hannaneh Hajishirzi. 2019. Mathqa: Towards interpretable math word problem solving with operation-based formalisms. Preprint, arXiv:1905.13319.
+
+Yongqi An, Xu Zhao, Tao Yu, Ming Tang,and Jinqiao Wang. 2024. Fluctuation-based adaptive structured pruning for large language models. In Proceedings of the AAAI Conference on Artificial Intelligence, volume 38,pages 10865-10873.
+
+Yonatan Bisk, Rowan Zellers, Jianfeng Gao,Yejin Choi, and 1 others. 2020. Piqa: Reasoning about physical commonsense in natural language. In Proceedings of the AAAI conference on artificial intelligence, vol-ume 34, pages 7432-7439.
+
+Jianfei Chen, Lianmin Zheng, Zhewei Yao,Dequan Wang, Ion Stoica, Michael Mahoney, and Joseph Gonzalez. 2021. Actnn: Reducing training mem-ory footprint via 2-bit activation compressed training. In International Conference on Machine Learning, pages 1803-1813.PMLR.
+
+Zhipeng Chen1,Kun Zhou,Beichen Zhang,Zheng Gong, Wayne Xin Zhao, and Ji-Rong Wen. 2023. Chat-cot: Tool-augmented chain-of-thought reasoning on chat-based large language models. arXiv preprint arXiv:2305.14323.
+
+Wei-Lin Chiang,Zhuohan Li,Zi Lin, Ying Sheng, Zhanghao Wu,Hao Zhang, Lianmin Zheng, Siyuan Zhuang,Yonghao Zhuang, Joseph E Gonzalez, and 1 others. 2023. Vicuna: An open-source chatbot impressing gpt-4 with 90%* chatgpt quality. See https://vicuna. lmsys.org (accessed 14 April 2023), 2(3):6.
+
+Peter Clark,Isaac Cowhey,Oren Etzioni, Tushar Khot, Ashish Sabharwal, Carissa Schoenick, and Oyvind Tafjord. 2018. Think you have solved question an-swering? try arc, the ai2 reasoning challenge. arXiv preprint arXiv:1803.05457.
+
+Antonia Creswell,Murray Shanahan, and Irina Higgins. 2022. Selection-inference: Exploiting large language models for interpretable logical reasoning. arXiv preprint arXiv:2205.09712.
+
+Rocktim Jyoti Das, Mingjie Sun, Liqun Ma,and Zhiqiang Shen. 2023. Beyond size: How gradients shape pruning decisions in large language models. arXiv preprint arXiv:2311.04902.
+
+DeepSeek-AI, Aixin Liu, Bei Feng, Bing Xue, Bingx-uan Wang, Bochao Wu, Chengda Lu,Chenggang Zhao,Chengqi Deng, Chenyu Zhang,Chong Ruan, Damai Dai, Daya Guo, Dejian Yang, Deli Chen, Dongjie Ji, Erhang Li, Fangyun Lin, Fucong Dai, and 181 others. 2025. Deepseek-v3 technical report. Preprint, arXiv:2412.19437.
+
+Xuan Ding, Yao Zhu, Yunjian Zhang, and Chuanlong Xie.2025. A sliding layer merging method for ef-ficient depth-wise pruning in llms. arXiv preprint arXiv:2502.19159.
+
+Jinhao Duan, Renming Zhang, James Diffenderfer, Bhavya Kailkhura, Lichao Sun, Elias Stengel-Eskin, Mohit Bansal, Tianlong Chen, and Kaidi Xu. 2024. Gtbench: Uncovering the strategic reasoning limita-tions of llms via game-theoretic evaluations. arXiv preprint arXiv:2402.12348.
+
+Elias Frantar and Dan Alistarh. 2023. Sparsegpt: Mas-sive language models can be accurately pruned in one-shot. In International Conference on Machine Learning, pages 10323-10337.PMLR.
+
+Elias Frantar, Saleh Ashkboos, Torsten Hoefler, and Dan Alistarh. 2022. Gptq: Accurate post-training quantization for generative pre-trained transformers. arXiv preprint arXiv:2210.17323.
+
+Leo Gao, Jonathan Tow, Baber Abbasi, Stella Bider-man, Sid Black, Anthony DiPofi, Charles Foster, Laurence Golding, Jeffrey Hsu,Alain Le Noac'h, Haonan Li, Kyle McDonell, Niklas Muennighoff, Chris Ociepa, Jason Phang, Laria Reynolds, Hailey Schoelkopf,Aviya Skowron, Lintang Sutawika, and 5 others. 2024. A framework for few-shot language model evaluation.
+
+Yuxian Gu, Li Dong, Furu Wei, and Minlie Huang. 2023. Minillm: Knowledge distillation of large language models. arXiv preprint arXiv:2306.08543.
+
+Cheng-Yu Hsieh, Chun-Liang Li,Chih-Kuan Yeh, Hootan Nakhost, Yasuhisa Fujii, Alexander Ratner, Ranjay Krishna, Chen-Yu Lee, and Tomas Pfister. 2023. Distilling step-by-step! outperforming larger language models with less training data and smaller model sizes. arXiv preprint arXiv:2305.02301.
+
+Yen-Chang Hsu, Ting Hua, Sungen Chang,Qian Lou, Yilin Shen,and Hongxia Jin. 2022. Language model compression with weighted low-rank factorization. arXiv preprint arXiv:2207.00112.
+
+Bo-Kyeong Kim,Geonmin Kim, Tae-Ho Kim, Thibault Castells, Shinkook Choi, Junho Shin, and Hyoung-Kyu Song. 2024. Shortened llama: A simple depth pruning for large language models. arXiv preprint arXiv:2402.02834,11.
+
+Yong-Deok Kim, Eunhyeok Park, Sungjoo Yoo,Taelim Choi,Lu Yang, and Dongjun Shin. 2015. Compres-sion of deep convolutional neural networks for fast and low power mobile applications. arXiv preprint arXiv:1511.06530.
+
+Jongwoo Ko, Sungnyun Kim, Tianyi Chen, and Se-Young Yun. 2024. Distillm: Towards streamlined distillation for large language models. arXiv preprint arXiv:2402.03898.
+
+Ji Lin, Jiaming Tang, Haotian Tang,Shang Yang,Wei-Ming Chen,Wei-Chen Wang,Guangxuan Xiao, Xingyu Dang, Chuang Gan, and Song Han. 2024. Awq: Activation-aware weight quantization for on-device llm compression and acceleration. Proceed-ings of Machine Learning and Systems, 6:87-100.
+
+Jieyi Long. 2023. Large language model guided tree-of-thought. arXiv preprint arXiv:2305.08291.
+
+Xinyin Ma, Gongfan Fang, and Xinchao Wang. 2023. Llm-pruner: On the structural pruning of large lan-guage models. Advances in neural information pro-cessing systems, 36:21702-21720.
+
+Mitchell P.Marcus, Beatrice Santorini, and Mary Ann Marcinkiewicz. 1993. Building a large annotated cor-pus of English: The Penn Treebank. Computational Linguistics, 19(2):313-330.
+
+Xin Men,Mingyu Xu, Qingyu Zhang, Bingning Wang, Hongyu Lin,Yaojie Lu, Xianpei Han, and Weipeng Chen. 2024. Shortgpt: Layers in large language models are more redundant than you expect. arXiv preprint arXiv:2403.03853.
+
+Stephen Merity, Caiming Xiong, James Bradbury,and Richard Socher. 2016. Pointer sentinel mixture mod-els. Preprint, arXiv:1609.07843.
+
+Todor Mihaylov, Peter Clark, Tushar Khot,and Ashish Sabharwal. 2018a. Can a suit of armor conduct elec-tricity? a new dataset for open book question answer-ing. arXiv preprint arXiv:1809.02789.
+
+Todor Mihaylov,Peter Clark, Tushar Khot, and Ashish Sabharwal. 2018b. Can a suit of armor conduct elec-tricity? a new dataset for open book question answer-ing. Preprint, arXiv:1809.02789.
+
+Liangming Pan, Alon Albalak, Xinyi Wang, and William Yang Wang. 2023. Logic-lm: Empower-ing large language models with symbolic solvers for faithful logical reasoning. arXiv preprint arXiv:2305.12295.
+
+Keisuke Sakaguchi, Ronan Le Bras, Chandra Bhagavat-ula,and Yejin Choi. 2021. Winogrande: An adver-sarial winograd schema challenge at scale. Commu-nications of the ACM, 64(9):99-106.
+
+Jiwon Song,Kyungseok Oh, Taesu Kim, Hyungjun Kim,Yulhwa Kim,and Jae-Joon Kim. 2024. Sleb: Streamlining llms through redundancy verification and elimination of transformer blocks. arXiv preprint arXiv:2402.09025.
+
+Mingjie Sun, Zhuang Liu, Anna Bair, and J Zico Kolter. 2023. A simple and effective pruning ap-proach for large language models. arXiv preprint arXiv:2306.11695.
+
+Hugo Touvron, Thibaut Lavril, Gautier Izacard, Xavier Martinet, Marie-Anne Lachaux, Timothée Lacroix, Bapotiste Rozière, Naman Goyal, Eric Hambro, Faisal Azhar, and 1 others. 2023. Llama: Open and effi-cient foundation language models. arXiv preprint arXiv:2302.13971,pages 1-27.
+
+Xin Wang, Zhongwei Wan, Arvin Hekmati, Mingyu Zong, Samiul Alam, Mi Zhang, and Bhaskar Krish-namachari. 2024a. Iot in the era of generative ai: Vision and challenges. IEEE Internet Computing.
+
+Xin Wang,Yu Zheng,Zhongwei Wan, and Mi Zhang. 2024b. Svd-llm: Truncation-aware singular value de-composition for large language model compression. arXiv preprint arXiv:2403.07378.
+
+Guangxuan Xiao, Ji Lin, Mickael Seznec, Hao Wu, Julien Demouth, and Song Han. 2023. Smoothqjuant: Accurate and efficient post-training quantization for large language models. In International Conference on Machine Learning, pages 38087-38099.PMLR.
+
+Zhihang Yuan, Yuzhang Shang, Yue Song,Qiang Wu,Yan Yan,and Guangyu Sun. 2023. Asvd: Activation-aware singular value decomposition for compressing large language models. arXiv preprint arXiv:2312.05821.
+
+Rowan Zellers, Ari Holtzman, Yonatan Bisk, Ali Farhadi, and Yejin Choi. 2019. Hellaswag: Can a machine reallyfinish your sentence? arXiv preprint arXiv:1905.07830.
+
+Yang Zhang, Yanfei Dong, and Kenji Kawaguchi.2024. Investigating layer importance in large language mod-els. arXiv preprint arXiv:2409.14381.
+
+Zixuan Zhou, Xuefei Ning, Ke Hong, Tianyu Fu,Ji-aming Xu,Shiyao Li, Yuming Lou, Luning Wang, Zhihang Yuan, Xiuhong Li, and 1 others. 2024. A survey on efficient inference for large language mod-els. arXiv preprint arXiv:2404.14294.
+
+# A Pseudocode of DipSVD
+
+Algorithm 1 shows the pseudocode of DipSVD. Before compression, DipSVD randomly collects a small amount of sentences as the calibration data C, it then runs the truncation-aware data whitening process as shown in Algorithm 2 to obtain the set of whitening matrix SetS for the weight to compress. After that, it runs the SVD and truncation with SetS on each weight matrix in the LLM. Before formally compressing the model, it is necessary to use heuristic methods or Bayesian optimization methods to obtain the compression ratios of differ-ent layers, as shown in Algorithm 3.
+
+# B Analysis of model computational complexity
+
+Computational complexity mainly depends on the model structure, parameter quantity, sequence length and hardware implementation. This section takes Vicuna-7b model as an example to discuss the computational gain brought by the DipSVD method at a 40% compression ratio.
+
+The DipSVD method achieves significant com-putational savings in Vicuna-7B through struactured low-rank approximation of weight matrices. For a given weight matrixW∈Rm×n,we decompose it via truncated SVD asW≈UlΣkVkT,where k«min(m,n) is the target rank detemined by Bayesian optimization under a 60% parameter bud-get constraint(mk+kn=0.6mn). This decompo-sition transforms the original matrix multiplication WX (computational complexity.CWX=m·n·p) into a two-step operation: $(1)\hat {X}=Σ_{k}V_{k}^{T}X$ (knp FLOPs) followved by(2) $U_{k}\hat {X}$ (mkp FLOPs),yield-ing total complexityCUV=k·p(m+n). Substi-tuing the optimal rank $k=\frac {0.6mn}{m+n}$ derived from the parameter constraint, we obtain a theoetical FLOPs reduction ratio of $=1-\frac {C_{UV}}{C_{WX}}=40\%$ 
+
+When applied to Vicuna-7B's 32-layer Trans-former architecture, this approach demonstrates three key advantages: (1) The self-attention mod-ule's Q/K/V projections (original 3Ld2 FLOPs) reduce to 2Ldk operations, while the FFN lay-ers' dense matrices (81Ld2FLOPs) compress to 4Ldk operations,whered=4096andk≈0.6d. (2) The 40% parameter reduction decreases mem-ory bandwidth pressure, with model size shrink-ing from 14GB to 8.4GB in FP16 format. Fig.6presents the throughput and inference speed of Vicuna-7B model compressed by DipSVD across varying batch sizes and sequence lengths. As antic-ipated, higher compression ratios yield measurable improvements in both throughput and inference speed.
+
+<!-- Performance under Different Batch Sizes and Sequence Lengths Ratio=0.5 Ratio=0.6 Ratio=0.7 Ratio=0.8 (a)Varying Batch Size on GPU (b)Varying Sequence Length on GPU 4000 3200 1400 出5/saOL 2400 1200 1600 2E/uL 800 1000 64 128 256 512 32 64 128 256 Batch Size 4 ence Length (c)Varying Batch Size on GPU (d)Varying Sequence Length on GPU -50 （2版）a 3 2 （2三）a 1 0 64 128 256 512 32 64 128 256 Batch Size Sequence Length -->
+![](./images/ba4cb9bb7745fbc5.jpg)
+
+Figure 6: Inference efficiency on Vicuna-7B under dif-ferent batch sizes and sequence lengths.
+
+# C Supplementary Experiment Results
+
+## C.1 Detailed performance
+
+Tab.7-11 present a comprehensive comparison be-tween our proposed DipSVD method and existing baselines across five foundational models. The re-sults clearly demonstrate the effectiveness of our approach, with evaluations on three language gen-eration datasets (measured by perplexity) and seven classification tasks (measured by accuracy). The consistent superiority of DipSVD across all bench-marks highlights its robustness and generalization capability.
+
+## C.2 Contents Generated from the compressed model
+
+In this section, we present sample outputs gener-ated by our compressed LLaMA-7B model using th proposed DipSVD method at varying compression ratios. As shown in Tab.12,our DipSVD method can maintain high-quality text generation across different compression levels, showcasing its robuast-ness in model compression.
+
+## Algorithm 1 Pseudocode of DipSVD
+
+**Input**: Original mmodel M, Target compression ratio R
+
+**Output**: Compressed model M′
+
+**Procedure**: DipSVD (M,R)
+
+1: Randomly collect several sentences as the calibration data C
+
+2: S←CHANNEL-WEIGHTED DATA WHITENING(M,C)
+
+3: {k1,k2,⋯,kL}←LAYER-SPECIFICCOMPRESSION(M)
+
+Extract the whitening matrix
+
+Extract the layer specific
+
+compression ratios
+
+4:for each layerl∈{1,⋯,L}do
+
+5:
+
+$$W_{l}\leftarrow \text {GetLayerWeights}(\mathcal {M},l)$$
+
+Obtain the set of weights in M to compress
+
+6:
+
+$$U_{l},Σ_{l},V_{l}\leftarrow \text {SVD}\left(W_{l}S_{l}\right)$$
+
+Apply singular value decomposition on W
+
+7:
+
+$$k_{l}\leftarrow \arg \min _{k}\left(\frac {\sum _{i=1}^{k}σ_{i}^{2}}{\sum σ_{i}^{2}}\geq k_{l}\right)$$
+
+8:
+
+$$Σ_{l}^{\prime }\leftarrow \text {diag}\left(σ_{1},\cdots ,σ_{k_{l}},0,\cdots ,0\right)$$
+
+Truncate the smallest singular values in Σ
+
+9:
+
+$$W_{l}^{\prime }\leftarrow U_{l}Σ_{l}^{\prime }V_{l}S_{l}^{-1}$$
+
+10:
+
+ReplaceWlwithWl′in M′
+
+11**:end for**
+
+12**: return** M′
+
+**End Procedure**
+
+# Algorithm 2 Pseudocode of Channel-weighted data whitening
+
+**Input**: Original model M; Calibration Data C; Diagonal scaling matrix D
+
+**Output**: Set of whitening matricesin M for the weight to compress SetS
+
+**Procedure**: CHANNEL-WEIGHTED DATA WHITENING(M,C)
+
+1: SetS←φ
+
+Initialize the set of whitening matrices
+
+2: SetW←M
+
+Obtain the setof weights in M to compress
+
+3:forW∈SetSdo
+
+4:
+
+$$X\leftarrow M(W,C)$$
+
+Obtain the input activation of the weight matrix W
+
+5:
+
+$$\tilde {X}^{T}\tilde {X}\leftarrow D^{T}X^{T}XD$$
+
+Obtain the input activation of the weight matrix W
+
+6:
+
+$$S\leftarrow \text {SVD}\left(\tilde {X}^{T}\tilde {X}\right)$$
+
+Apply singular value decomposition on $\tilde {X}^{T}\tilde {X}$ 
+
+7:
+
+$$Σ_{1}\leftarrow \text {Trunc.}(Σ)$$
+
+Truncate the smallest singular values in Σ
+
+8:
+
+$$\text {Set}_{S}\leftarrow S\bigcup \text {Set}_{S}$$
+
+Store the whitening weight matrix in the set
+
+9**:end for**
+
+10**: return** SetS
+
+**End Procedure**
+
+# Algorithm 3 Pseudocode of Layer-specific Compression
+
+**Input**: Original model M; Input activation x; Target compression ratio R;
+
+**Parameters**: Global imnportance preservation method mE{Bayesian, Heuristic}, Energy threshold τ∈(0,1) (default: 0.95), Trade-off parameterβ∈[0,1](default:0.3)
+
+**Output**: A list of allocated compression ratios{k1,⋯,kL}
+
+1: Randomly collect several sentennces as the calibration data C
+
+2:ifm=Heuristicthen
+
+3:
+
+$$S\leftarrow FisherSensitivity(M,C)$$
+
+Algorithm 4
+
+4:
+
+U←EffectiveRank(M,C,T)
+
+Algorithm 5
+
+5:
+
+6:
+
+Normalize metrics: $\begin{array}{c}\tilde {S}\leftarrow \frac {S-\min (S)}{\max (S)-\min (S)}+ε\tilde {U}\leftarrow \frac {U-\min (U)}{\max (U)-\min (U)}+ε\\ \text {importanc:}W\leftarrow \tilde {S}^{\beta }\circ \tilde {U}^{1-\beta }\end{array}$ 
+
+Compute combined $W\leftarrow \tilde {S}^{\beta }\circ$ 
+
+7:
+
+Allocate ratios:{k1, ..., kr} ← ProportionalAllocation(W,R)
+
+8:else
+
+9:
+
+Initialize Bayesian Optimizer:B←BO(domain=[0.25,1]L,acq=EI)
+
+10:
+
+fort←1 to T do
+
+11:
+
+$$\mathbf {r}_{t}\leftarrow \mathcal {B}\text {.query}()$$
+
+12:
+
+$$M^{\prime }\leftarrow \text {Compress}\left(M,\mathbf {r}_{t}\right)$$
+
+13:
+
+$$\text {score}\leftarrow -\text {Perplexity}\left(M^{\prime },C\right)$$
+
+14:
+
+B.updat(rt,score)
+
+15:
+
+**end for**
+
+16:
+
+$$\left\{k_{1},\cdots ,k_{L}\right\}\leftarrow \mathcal {B}.\text {best_{params}}()$$
+
+17**: end if**
+
+18**: return**{k1,⋯,kL}
+
+# Algorithm 4 Fisher Sensitivity Computation
+
+**1**: **function** COMPUTEFISHERSENSITIVITY(M,C)
+
+2:
+
+InitializeS←0L
+
+3:
+
+**for** each batchB⊂Cdo
+
+4:
+
+Compute gradients∇Lvia backpropagation
+
+5:
+
+**for** each layerl∈{1,⋯,L}do
+
+6:
+
+$$s_{l}\leftarrow \sum _{p\in \theta _{l}}\frac {\left\|\nabla _{p}\mathcal {L}\right\|_{2}}{\|p\|_{2}+ε}$$
+
+7:
+
+$$S[l]\leftarrow S[l]+s_{l}$$
+
+8:
+
+**end for**
+
+9:
+
+**end for**
+
+10:
+
+Apply segmented normalization to S
+
+11:
+
+**return**S-1
+
+Inversesensitivity
+
+12**: end function**
+
+# Algorithm 5 Effective Rank Computation
+
+**1**: **function** COMPUTEEFFECTIVERANK(M,C,T)
+
+2:
+
+InitializeU←0L
+
+3:
+
+**for** each batchB⊂Cdo
+
+4:
+
+Get hidden states{h1,⋯,hL}
+
+5:
+
+**for** each layerl∈{1,⋯,L}do
+
+6:
+
+Hl←reshape (hl,[-1,dl])
+
+7:
+
+$$\left\{σ_{i}\right\}\leftarrow \text {SVD}\left(H_{l}\right)$$
+
+8:
+
+9:
+
+$$k\leftarrow \min \left\{k^{\prime }|\sum _{i=1}^{k^{\prime }}σ_{i}^{2}\geq τ\sum σ_{i}^{2}\right\}$$
+
+$$U[l]\leftarrow U[l]+k$$
+
+10:
+
+**end for**
+
+11:
+
+**end for**
+
+12:
+
+U← $\leftarrow \frac {}{|\mathcal {C}|/\text {batch_{size}}}$ 
+
+13:
+
+**return** z-scoreore(U)
+
+14**: end function**
+
+<table border="1" ><tr>
+<td>Radio</td>
+<td>Method</td>
+<td>WikiText-2</td>
+<td>PTB</td>
+<td>C4</td>
+<td>Openb.</td>
+<td>ARC</td>
+<td>WinoG</td>
+<td> HellaS.</td>
+<td>ARC</td>
+<td>PIQA</td>
+<td>MathQA</td>
+<td>Average</td>
+</tr><tr>
+<td rowspan="4">0.8</td>
+<td>ASVD</td>
+<td>8.759</td>
+<td>12.705</td>
+<td>10.833</td>
+<td>0.296</td>
+<td>0.671</td>
+<td>0.694</td>
+<td>0.505</td>
+<td>0.340</td>
+<td>0.750</td>
+<td>0.233</td>
+<td>0.498</td>
+</tr><tr>
+<td>FWSVD</td>
+<td>9.280</td>
+<td>14.525</td>
+<td>11.880</td>
+<td>0.266</td>
+<td>0.679</td>
+<td>0.646</td>
+<td>0.472</td>
+<td>0.329</td>
+<td>0.742</td>
+<td>0.228</td>
+<td>0.480</td>
+</tr><tr>
+<td>SVD-LLM</td>
+<td>7.894</td>
+<td>16.848</td>
+<td>16.118</td>
+<td>0.258</td>
+<td>0.623</td>
+<td>0.652</td>
+<td>0.433</td>
+<td>0.310</td>
+<td>0.687</td>
+<td>0.234</td>
+<td>0.457</td>
+</tr><tr>
+<td>Ours</td>
+<td>7.949</td>
+<td>15.597</td>
+<td>14.074</td>
+<td>0.268</td>
+<td>0.633</td>
+<td>0.648</td>
+<td>0.454</td>
+<td>0.328</td>
+<td>0.710</td>
+<td>0.238</td>
+<td>0.468</td>
+</tr><tr>
+<td rowspan="4">0.7</td>
+<td>ASVD</td>
+<td>95.268</td>
+<td>200.937</td>
+<td>86.269</td>
+<td>0.186</td>
+<td>0.379</td>
+<td>0.557</td>
+<td>0.333</td>
+<td>0.242</td>
+<td>0.607</td>
+<td>0.218</td>
+<td>0.360</td>
+</tr><tr>
+<td>FWSVD</td>
+<td>33.001</td>
+<td>53.587</td>
+<td>38.240</td>
+<td>0.186</td>
+<td>0.507</td>
+<td>0.572</td>
+<td>0.343</td>
+<td>0.242</td>
+<td>0.632</td>
+<td>0.217</td>
+<td>0.386</td>
+</tr><tr>
+<td>SVD-LLM</td>
+<td>9.526</td>
+<td>28.967</td>
+<td>26.390</td>
+<td>0.242</td>
+<td>0.509</td>
+<td>0.570</td>
+<td>0.352</td>
+<td>0.269</td>
+<td>0.630</td>
+<td>0.227</td>
+<td>0.400</td>
+</tr><tr>
+<td>Ours</td>
+<td>9.427</td>
+<td>22.270</td>
+<td>19.909</td>
+<td>0.242</td>
+<td>0.602</td>
+<td>0.640</td>
+<td>0.405</td>
+<td>0.296</td>
+<td>0.661</td>
+<td>0.230</td>
+<td>0.440</td>
+</tr><tr>
+<td rowspan="4">0.6</td>
+<td>ASVD</td>
+<td>9111.411</td>
+<td>19425.612</td>
+<td>8676.642</td>
+<td>0.158</td>
+<td>0.286</td>
+<td>0.486</td>
+<td>0.267</td>
+<td>0.210</td>
+<td>0.538</td>
+<td>0.204</td>
+<td>0.307</td>
+</tr><tr>
+<td>FWSVD</td>
+<td>199.142</td>
+<td>332.344</td>
+<td>255.026</td>
+<td>0.158</td>
+<td>0.348</td>
+<td>0.526</td>
+<td>0.275</td>
+<td>0.195</td>
+<td>0.571</td>
+<td>0.211</td>
+<td>0.326</td>
+</tr><tr>
+<td>SVD-LLM</td>
+<td>13.854</td>
+<td>63.864</td>
+<td>57.281</td>
+<td>0.208</td>
+<td>0.455</td>
+<td>0.566</td>
+<td>0.323</td>
+<td>0.240</td>
+<td>0.598</td>
+<td>0.217</td>
+<td>0.372</td>
+</tr><tr>
+<td>Ours</td>
+<td>12.760</td>
+<td>46.951</td>
+<td>34.352</td>
+<td>0.222</td>
+<td>0.503</td>
+<td>0.613</td>
+<td>0.358</td>
+<td>0.277</td>
+<td>0.640</td>
+<td>0.224</td>
+<td>0.405</td>
+</tr><tr>
+<td rowspan="4">0.5</td>
+<td>ASVD</td>
+<td>37479.324</td>
+<td>57294.849</td>
+<td>37767.010</td>
+<td>0.124</td>
+<td>0.263</td>
+<td>0.508</td>
+<td>0.256</td>
+<td>0.212</td>
+<td>0.519</td>
+<td>0.202</td>
+<td>0.298</td>
+</tr><tr>
+<td>FWSVD</td>
+<td>4622.404</td>
+<td>8861.445</td>
+<td>9240.634</td>
+<td>0.124</td>
+<td>0.277</td>
+<td>0.508</td>
+<td>0.260</td>
+<td>0.207</td>
+<td>0.535</td>
+<td>0.210</td>
+<td>0.303</td>
+</tr><tr>
+<td>SVD-LLM</td>
+<td>26.864</td>
+<td>191.380</td>
+<td>153.840</td>
+<td>0.160</td>
+<td>0.361</td>
+<td>0.540</td>
+<td>0.288</td>
+<td>0.207</td>
+<td>0.570</td>
+<td>0.216</td>
+<td>0.334</td>
+</tr><tr>
+<td>Ours</td>
+<td>20.983</td>
+<td>116.404</td>
+<td>94.796</td>
+<td>0.192</td>
+<td>0.382</td>
+<td>0.559</td>
+<td>0.306</td>
+<td>0.223</td>
+<td>0.590</td>
+<td>0.229</td>
+<td>0.354</td>
+</tr></table>
+
+Table 7: Overall Performance of LLama-7B.
+
+<table border="1" ><tr>
+<td>Radio</td>
+<td>Method</td>
+<td>WikiText-2</td>
+<td>PTB</td>
+<td>C4</td>
+<td>Openb.</td>
+<td>ARC</td>
+<td>WinoG.</td>
+<td> HellaS.</td>
+<td>ARC</td>
+<td>PIQA</td>
+<td>MathQA</td>
+<td>Average</td>
+</tr><tr>
+<td rowspan="4">0.8</td>
+<td>ASVD</td>
+<td>13.723</td>
+<td>72.029</td>
+<td>18.261</td>
+<td>0.264</td>
+<td>0.641</td>
+<td>0.624</td>
+<td>0.440</td>
+<td>0.347</td>
+<td>0.701</td>
+<td>0.237</td>
+<td>0.465</td>
+</tr><tr>
+<td>FWSVD</td>
+<td>15.312</td>
+<td>75.042</td>
+<td>19.945</td>
+<td>0.238</td>
+<td>0.611</td>
+<td>0.627</td>
+<td>0.401</td>
+<td>0.309</td>
+<td>0.695</td>
+<td>0.233</td>
+<td>0.445</td>
+</tr><tr>
+<td>SVD-LLM</td>
+<td>9.942</td>
+<td>71.366</td>
+<td>23.358</td>
+<td>0.252</td>
+<td>0.579</td>
+<td>0.598</td>
+<td>0.401</td>
+<td>0.315</td>
+<td>0.666</td>
+<td>0.229</td>
+<td>0.434</td>
+</tr><tr>
+<td>Ours</td>
+<td>9.952</td>
+<td>56.869</td>
+<td>19.722</td>
+<td>0.268</td>
+<td>0.650</td>
+<td>0.598</td>
+<td>0.431</td>
+<td>0.345</td>
+<td>0.689</td>
+<td>0.247</td>
+<td>0.461</td>
+</tr><tr>
+<td rowspan="4">0.7</td>
+<td>ASVD</td>
+<td>91.388</td>
+<td>415.615</td>
+<td>136.157</td>
+<td>0.158</td>
+<td>0.335</td>
+<td>0.503</td>
+<td>0.287</td>
+<td>0.208</td>
+<td>0.556</td>
+<td>0.205</td>
+<td>0.322</td>
+</tr><tr>
+<td>FWSVD</td>
+<td>43.690</td>
+<td>239.318</td>
+<td>64.753</td>
+<td>0.172</td>
+<td>0.459</td>
+<td>0.545</td>
+<td>0.312</td>
+<td>0.224</td>
+<td>0.613</td>
+<td>0.221</td>
+<td>0.364</td>
+</tr><tr>
+<td>SVD-LLM</td>
+<td>12.416</td>
+<td>124.506</td>
+<td>39.528</td>
+<td>0.244</td>
+<td>0.506</td>
+<td>0.570</td>
+<td>0.353</td>
+<td>0.270</td>
+<td>0.629</td>
+<td>0.228</td>
+<td>0.400</td>
+</tr><tr>
+<td>Ours</td>
+<td>12.144</td>
+<td>81.089</td>
+<td>28.837</td>
+<td>0.248</td>
+<td>0.573</td>
+<td>0.597</td>
+<td>0.384</td>
+<td>0.293</td>
+<td>0.659</td>
+<td>0.232</td>
+<td>0.427</td>
+</tr><tr>
+<td rowspan="4">0.6</td>
+<td>ASVD</td>
+<td>1580.427</td>
+<td>3069.448</td>
+<td>1735.991</td>
+<td>0.126</td>
+<td>0.273</td>
+<td>0.524</td>
+<td>0.259</td>
+<td>0.224</td>
+<td>0.527</td>
+<td>0.215</td>
+<td>0.307</td>
+</tr><tr>
+<td>FWSVD</td>
+<td>347.362</td>
+<td>1711.730</td>
+<td>461.874</td>
+<td>0.128</td>
+<td>0.293</td>
+<td>0.519</td>
+<td>0.267</td>
+<td>0.209</td>
+<td>0.554</td>
+<td>0.212</td>
+<td>0.312</td>
+</tr><tr>
+<td>SVD-LLM</td>
+<td>18.347</td>
+<td>261.100</td>
+<td>77.706</td>
+<td>0.188</td>
+<td>0.430</td>
+<td>0.542</td>
+<td>0.314</td>
+<td>0.238</td>
+<td>0.590</td>
+<td>0.217</td>
+<td>0.360</td>
+</tr><tr>
+<td>Ours</td>
+<td>17.085</td>
+<td>142.752</td>
+<td>49.183</td>
+<td>0.194</td>
+<td>0.469</td>
+<td>0.580</td>
+<td>0.345</td>
+<td>0.259</td>
+<td>0.613</td>
+<td>0.231</td>
+<td>0.384</td>
+</tr><tr>
+<td rowspan="4">0.5</td>
+<td>ASVD</td>
+<td>22934.960</td>
+<td>28252.915</td>
+<td>24201.540</td>
+<td>0.146</td>
+<td>0.249</td>
+<td>0.508</td>
+<td>0.258</td>
+<td>0.213</td>
+<td>0.512</td>
+<td>0.185</td>
+<td>0.296</td>
+</tr><tr>
+<td>FWSVD</td>
+<td>4449.084</td>
+<td>9353.528</td>
+<td>4421.253</td>
+<td>0.128</td>
+<td>0.273</td>
+<td>0.501</td>
+<td>0.262</td>
+<td>0.210</td>
+<td>0.533</td>
+<td>0.201</td>
+<td>0.301</td>
+</tr><tr>
+<td>SVD-LLM</td>
+<td>35.569</td>
+<td>615.591</td>
+<td>185.780</td>
+<td>0.158</td>
+<td>0.338</td>
+<td>0.525</td>
+<td>0.286</td>
+<td>0.231</td>
+<td>0.567</td>
+<td>0.225</td>
+<td>0.333</td>
+</tr><tr>
+<td>Ours</td>
+<td>27.807</td>
+<td>375.093</td>
+<td>111.996</td>
+<td>0.170</td>
+<td>0.365</td>
+<td>0.543</td>
+<td>0.300</td>
+<td>0.220</td>
+<td>0.571</td>
+<td>0.221</td>
+<td>0.342</td>
+</tr></table>
+
+Table 8: Overall Performance of Vicuna-7B.
+
+<table border="1" ><tr>
+<td>Radio</td>
+<td>Method</td>
+<td>WikiText-2</td>
+<td>PTB</td>
+<td>C4</td>
+<td>Openb.</td>
+<td>ARCe</td>
+<td>WinoG.</td>
+<td> HellaS.</td>
+<td>ARCc</td>
+<td>PIQA</td>
+<td>MathQA</td>
+<td>Average</td>
+</tr><tr>
+<td rowspan="4">0.8</td>
+<td>ASVD</td>
+<td>12.727</td>
+<td>17.215</td>
+<td>16.851</td>
+<td>0.288</td>
+<td>0.654</td>
+<td>0.650</td>
+<td>0.486</td>
+<td>0.325</td>
+<td>0.742</td>
+<td>0.237</td>
+<td>0.483</td>
+</tr><tr>
+<td>FWSVD</td>
+<td>15.578</td>
+<td>23.550</td>
+<td>24.258</td>
+<td>0.238</td>
+<td>0.617</td>
+<td>0.643</td>
+<td>0.411</td>
+<td>0.274</td>
+<td>0.714</td>
+<td>0.242</td>
+<td>0.448</td>
+</tr><tr>
+<td>SVD-LLM</td>
+<td>9.128</td>
+<td>19.106</td>
+<td>21.004</td>
+<td>0.286</td>
+<td>0.636</td>
+<td>0.650</td>
+<td>0.431</td>
+<td>0.330</td>
+<td>0.711</td>
+<td>0.243</td>
+<td>0.470</td>
+</tr><tr>
+<td>Ours</td>
+<td>8.805</td>
+<td>15.890</td>
+<td>17.732</td>
+<td>0.290</td>
+<td>0.665</td>
+<td>0.663</td>
+<td>0.450</td>
+<td>0.342</td>
+<td>0.721</td>
+<td>0.256</td>
+<td>0.484</td>
+</tr><tr>
+<td rowspan="4">0.7</td>
+<td>ASVD</td>
+<td>85.169</td>
+<td>87.709</td>
+<td>79.853</td>
+<td>0.154</td>
+<td>0.390</td>
+<td>0.516</td>
+<td>0.312</td>
+<td>0.213</td>
+<td>0.610</td>
+<td>0.210</td>
+<td>0.344</td>
+</tr><tr>
+<td>FWSVD</td>
+<td>68.416</td>
+<td>99.775</td>
+<td>118.319</td>
+<td>0.142</td>
+<td>0.406</td>
+<td>0.551</td>
+<td>0.296</td>
+<td>0.194</td>
+<td>0.595</td>
+<td>0.220</td>
+<td>0.344</td>
+</tr><tr>
+<td>SVD-LLM</td>
+<td>10.841</td>
+<td>30.747</td>
+<td>32.622</td>
+<td>0.260</td>
+<td>0.589</td>
+<td>0.609</td>
+<td>0.384</td>
+<td>0.283</td>
+<td>0.670</td>
+<td>0.232</td>
+<td>0.432</td>
+</tr><tr>
+<td>Ours</td>
+<td>9.895</td>
+<td>20.977</td>
+<td>22.558</td>
+<td>0.276</td>
+<td>0.628</td>
+<td>0.631</td>
+<td>0.415</td>
+<td>0.312</td>
+<td>0.700</td>
+<td>0.239</td>
+<td>0.457</td>
+</tr><tr>
+<td rowspan="4">0.6</td>
+<td>ASVD</td>
+<td>3806.825</td>
+<td>7580.528</td>
+<td>4355.394</td>
+<td>0.140</td>
+<td>0.298</td>
+<td>0.494</td>
+<td>0.267</td>
+<td>0.202</td>
+<td>0.546</td>
+<td>0.209</td>
+<td>0.308</td>
+</tr><tr>
+<td>FWSVD</td>
+<td>202.822</td>
+<td>265.391</td>
+<td>325.196</td>
+<td>0.126</td>
+<td>0.309</td>
+<td>0.499</td>
+<td>0.267</td>
+<td>0.184</td>
+<td>0.545</td>
+<td>0.215</td>
+<td>0.306</td>
+</tr><tr>
+<td>SVD-LLM</td>
+<td>14.449</td>
+<td>55.803</td>
+<td>58.199</td>
+<td>0.228</td>
+<td>0.529</td>
+<td>0.578</td>
+<td>0.336</td>
+<td>0.241</td>
+<td>0.626</td>
+<td>0.225</td>
+<td>0.395</td>
+</tr><tr>
+<td>Ours</td>
+<td>12.077</td>
+<td>32.890</td>
+<td>35.540</td>
+<td>0.250</td>
+<td>0.572</td>
+<td>0.624</td>
+<td>0.366</td>
+<td>0.285</td>
+<td>0.653</td>
+<td>0.233</td>
+<td>0.426</td>
+</tr><tr>
+<td rowspan="4">0.5</td>
+<td>ASVD</td>
+<td>64971.820</td>
+<td>99927.992</td>
+<td>57731.498</td>
+<td>0.128</td>
+<td>0.262</td>
+<td>0.498</td>
+<td>0.263</td>
+<td>0.213</td>
+<td>0.515</td>
+<td>0.201</td>
+<td>0.297</td>
+</tr><tr>
+<td>FWSVD</td>
+<td>600.397</td>
+<td>890.699</td>
+<td>774.628</td>
+<td>0.132</td>
+<td>0.281</td>
+<td>0.478</td>
+<td>0.264</td>
+<td>0.195</td>
+<td>0.531</td>
+<td>0.205</td>
+<td>0.298</td>
+</tr><tr>
+<td>SVD-LLM</td>
+<td>22.660</td>
+<td>132.187</td>
+<td>117.580</td>
+<td>0.192</td>
+<td>0.427</td>
+<td>0.538</td>
+<td>0.300</td>
+<td>0.220</td>
+<td>0.591</td>
+<td>0.213</td>
+<td>0.355</td>
+</tr><tr>
+<td>Ours</td>
+<td>17.960</td>
+<td>79.482</td>
+<td>73.707</td>
+<td>0.194</td>
+<td>0.468</td>
+<td>0.554</td>
+<td>0.316</td>
+<td>0.222</td>
+<td>0.609</td>
+<td>0.223</td>
+<td>0.369</td>
+</tr></table>
+
+Table 9: Overall Performance of Deepseek-7B.
+
+<table border="1" ><tr>
+<td>Radio</td>
+<td>Method</td>
+<td>WikiText-2</td>
+<td>PTB</td>
+<td>C4</td>
+<td>Openb.</td>
+<td>ARCe</td>
+<td>WinoG.</td>
+<td>HellaS.</td>
+<td>ARCc</td>
+<td>PIQA</td>
+<td>MathQA</td>
+<td>Average</td>
+</tr><tr>
+<td rowspan="4">0.8</td>
+<td>ASVD</td>
+<td>6.743</td>
+<td>10.407</td>
+<td>9.123</td>
+<td>0.330</td>
+<td>0.732</td>
+<td>0.707</td>
+<td>0.540</td>
+<td>0.431</td>
+<td>0.771</td>
+<td>0.251</td>
+<td>0.538</td>
+</tr><tr>
+<td>FWSVD</td>
+<td>6.938</td>
+<td>11.231</td>
+<td>9.499</td>
+<td>0.312</td>
+<td>0.737</td>
+<td>0.696</td>
+<td>0.518</td>
+<td>0.393</td>
+<td>0.769</td>
+<td>0.258</td>
+<td>0.526</td>
+</tr><tr>
+<td>SVD-LLM</td>
+<td>6.575</td>
+<td>12.194</td>
+<td>12.811</td>
+<td>0.302</td>
+<td>0.683</td>
+<td>0.684</td>
+<td>0.470</td>
+<td>0.356</td>
+<td>0.725</td>
+<td>0.265</td>
+<td>0.498</td>
+</tr><tr>
+<td>Ours</td>
+<td>6.649</td>
+<td>11.383</td>
+<td>11.418</td>
+<td>0.306</td>
+<td>0.681</td>
+<td>0.692</td>
+<td>0.490</td>
+<td>0.369</td>
+<td>0.734</td>
+<td>0.258</td>
+<td>0.503</td>
+</tr><tr>
+<td rowspan="4">0.7</td>
+<td>ASVD</td>
+<td>17.648</td>
+<td>32.963</td>
+<td>20.866</td>
+<td>0.218</td>
+<td>0.551</td>
+<td>0.611</td>
+<td>0.398</td>
+<td>0.288</td>
+<td>0.690</td>
+<td>0.217</td>
+<td>0.425</td>
+</tr><tr>
+<td>FWSVD</td>
+<td>12.963</td>
+<td>22.123</td>
+<td>18.509</td>
+<td>0.248</td>
+<td>0.632</td>
+<td>0.640</td>
+<td>0.403</td>
+<td>0.294</td>
+<td>0.707</td>
+<td>0.229</td>
+<td>0.450</td>
+</tr><tr>
+<td>SVD-LLM</td>
+<td>7.618</td>
+<td>17.823</td>
+<td>18.825</td>
+<td>0.276</td>
+<td>0.619</td>
+<td>0.672</td>
+<td>0.415</td>
+<td>0.300</td>
+<td>0.671</td>
+<td>0.242</td>
+<td>0.457</td>
+</tr><tr>
+<td>Ours</td>
+<td>7.697</td>
+<td>15.681</td>
+<td>14.614</td>
+<td>0.284</td>
+<td>0.641</td>
+<td>0.656</td>
+<td>0.449</td>
+<td>0.328</td>
+<td>0.694</td>
+<td>0.249</td>
+<td>0.472</td>
+</tr><tr>
+<td rowspan="4">0.6</td>
+<td>ASVD</td>
+<td>201.027</td>
+<td>286.850</td>
+<td>183.898</td>
+<td>0.148</td>
+<td>0.336</td>
+<td>0.518</td>
+<td>0.293</td>
+<td>0.197</td>
+<td>0.579</td>
+<td>0.215</td>
+<td>0.327</td>
+</tr><tr>
+<td>FWSVD</td>
+<td>45.150</td>
+<td>75.662</td>
+<td>64.610</td>
+<td>0.166</td>
+<td>0.431</td>
+<td>0.552</td>
+<td>0.305</td>
+<td>0.219</td>
+<td>0.607</td>
+<td>0.226</td>
+<td>0.358</td>
+</tr><tr>
+<td>SVD-LLM</td>
+<td>9.836</td>
+<td>34.222</td>
+<td>33.328</td>
+<td>0.222</td>
+<td>0.521</td>
+<td>0.639</td>
+<td>0.355</td>
+<td>0.248</td>
+<td>0.637</td>
+<td>0.228</td>
+<td>0.407</td>
+</tr><tr>
+<td>Ours</td>
+<td>9.575</td>
+<td>25.782</td>
+<td>21.716</td>
+<td>0.230</td>
+<td>0.548</td>
+<td>0.644</td>
+<td>0.402</td>
+<td>0.283</td>
+<td>0.661</td>
+<td>0.233</td>
+<td>0.429</td>
+</tr><tr>
+<td rowspan="4">0.5</td>
+<td>ASVD</td>
+<td>11445.274</td>
+<td>13304.711</td>
+<td>10897.571</td>
+<td>0.116</td>
+<td>0.270</td>
+<td>0.490</td>
+<td>0.267</td>
+<td>0.221</td>
+<td>0.535</td>
+<td>0.206</td>
+<td>0.301</td>
+</tr><tr>
+<td>FWSVD</td>
+<td>193.531</td>
+<td>275.487</td>
+<td>245.409</td>
+<td>0.126</td>
+<td>0.304</td>
+<td>0.518</td>
+<td>0.270</td>
+<td>0.176</td>
+<td>0.550</td>
+<td>0.213</td>
+<td>0.308</td>
+</tr><tr>
+<td>SVD-LLM</td>
+<td>14.984</td>
+<td>89.288</td>
+<td>68.417</td>
+<td>0.194</td>
+<td>0.420</td>
+<td>0.582</td>
+<td>0.314</td>
+<td>0.224</td>
+<td>0.588</td>
+<td>0.220</td>
+<td>0.363</td>
+</tr><tr>
+<td>Ours</td>
+<td>13.526</td>
+<td>74.449</td>
+<td>45.166</td>
+<td>0.192</td>
+<td>0.447</td>
+<td>0.603</td>
+<td>0.333</td>
+<td>0.229</td>
+<td>0.612</td>
+<td>0.229</td>
+<td>0.378</td>
+</tr></table>
+
+Table 10: Overall Performance of LLama-13B.
+
+<table border="1" ><tr>
+<td>Radio</td>
+<td>Method</td>
+<td>WikiText-2</td>
+<td>PTB</td>
+<td>C4</td>
+<td>Openb.</td>
+<td>ARCe</td>
+<td>WinoG.</td>
+<td> HellaS.</td>
+<td>ARCc</td>
+<td>PIQA</td>
+<td>MathQA</td>
+<td>Average</td>
+</tr><tr>
+<td rowspan="4">0.8</td>
+<td>ASVD</td>
+<td>10.261</td>
+<td>135.308</td>
+<td>14.523</td>
+<td>0.276</td>
+<td>0.684</td>
+<td>0.663</td>
+<td>0.466</td>
+<td>0.368</td>
+<td>0.739</td>
+<td>0.259</td>
+<td>0.493</td>
+</tr><tr>
+<td>FWSVD</td>
+<td>12.636</td>
+<td>152.403</td>
+<td>19.540</td>
+<td>0.230</td>
+<td>0.657</td>
+<td>0.624</td>
+<td>0.412</td>
+<td>0.312</td>
+<td>0.717</td>
+<td>0.237</td>
+<td>0.456</td>
+</tr><tr>
+<td>SVD-LLM</td>
+<td>8.035</td>
+<td>82.811</td>
+<td>18.269</td>
+<td>0.314</td>
+<td>0.687</td>
+<td>0.671</td>
+<td>0.456</td>
+<td>0.378</td>
+<td>0.727</td>
+<td>0.264</td>
+<td>0.500</td>
+</tr><tr>
+<td>Ours</td>
+<td>7.892</td>
+<td>36.405</td>
+<td>14.225</td>
+<td>0.306</td>
+<td>0.666</td>
+<td>0.674</td>
+<td>0.471</td>
+<td>0.357</td>
+<td>0.718</td>
+<td>0.262</td>
+<td>0.493</td>
+</tr><tr>
+<td rowspan="4">0.7</td>
+<td>ASVD</td>
+<td>28.309</td>
+<td>637.196</td>
+<td>39.799</td>
+<td>0.220</td>
+<td>0.528</td>
+<td>0.574</td>
+<td>0.340</td>
+<td>0.250</td>
+<td>0.669</td>
+<td>0.226</td>
+<td>0.401</td>
+</tr><tr>
+<td>FWSVD</td>
+<td>32.715</td>
+<td>310.304</td>
+<td>47.408</td>
+<td>0.188</td>
+<td>0.506</td>
+<td>0.564</td>
+<td>0.317</td>
+<td>0.234</td>
+<td>0.647</td>
+<td>0.223</td>
+<td>0.383</td>
+</tr><tr>
+<td>SVD-LLM</td>
+<td>9.616</td>
+<td>145.715</td>
+<td>29.204</td>
+<td>0.284</td>
+<td>0.620</td>
+<td>0.641</td>
+<td>0.390</td>
+<td>0.300</td>
+<td>0.656</td>
+<td>0.250</td>
+<td>0.449</td>
+</tr><tr>
+<td>Ours</td>
+<td>9.070</td>
+<td>49.948</td>
+<td>19.203</td>
+<td>0.268</td>
+<td>0.610</td>
+<td>0.657</td>
+<td>0.419</td>
+<td>0.320</td>
+<td>0.688</td>
+<td>0.243</td>
+<td>0.458</td>
+</tr><tr>
+<td rowspan="4">0.6</td>
+<td>ASVD</td>
+<td>189.392</td>
+<td>1601.441</td>
+<td>190.550</td>
+<td>0.128</td>
+<td>0.310</td>
+<td>0.518</td>
+<td>0.276</td>
+<td>0.202</td>
+<td>0.572</td>
+<td>0.214</td>
+<td>0.317</td>
+</tr><tr>
+<td>FWSVD</td>
+<td>106.356</td>
+<td>668.389</td>
+<td>146.253</td>
+<td>0.130</td>
+<td>0.307</td>
+<td>0.510</td>
+<td>0.278</td>
+<td>0.190</td>
+<td>0.550</td>
+<td>0.218</td>
+<td>0.312</td>
+</tr><tr>
+<td>SVD-LLM</td>
+<td>13.221</td>
+<td>324.892</td>
+<td>58.335</td>
+<td>0.244</td>
+<td>0.506</td>
+<td>0.600</td>
+<td>0.333</td>
+<td>0.237</td>
+<td>0.598</td>
+<td>0.232</td>
+<td>0.393</td>
+</tr><tr>
+<td>Ours</td>
+<td>12.138</td>
+<td>73.798</td>
+<td>32.224</td>
+<td>0.230</td>
+<td>0.511</td>
+<td>0.609</td>
+<td>0.358</td>
+<td>0.273</td>
+<td>0.640</td>
+<td>0.227</td>
+<td>0.407</td>
+</tr><tr>
+<td rowspan="4">0.5</td>
+<td>ASVD</td>
+<td>1220.318</td>
+<td>3922.871</td>
+<td>1080.129</td>
+<td>0.144</td>
+<td>0.275</td>
+<td>0.485</td>
+<td>0.262</td>
+<td>0.228</td>
+<td>0.536</td>
+<td>0.209</td>
+<td>0.306</td>
+</tr><tr>
+<td>FWSVD</td>
+<td>304.176</td>
+<td>1475.578</td>
+<td>395.776</td>
+<td>0.124</td>
+<td>0.284</td>
+<td>0.489</td>
+<td>0.264</td>
+<td>0.207</td>
+<td>0.540</td>
+<td>0.202</td>
+<td>0.301</td>
+</tr><tr>
+<td>SVD-LLM</td>
+<td>23.607</td>
+<td>699.598</td>
+<td>140.584</td>
+<td>0.172</td>
+<td>0.372</td>
+<td>0.563</td>
+<td>0.296</td>
+<td>0.218</td>
+<td>0.563</td>
+<td>0.220</td>
+<td>0.343</td>
+</tr><tr>
+<td>Ours</td>
+<td>18.150</td>
+<td>148.365</td>
+<td>71.652</td>
+<td>0.184</td>
+<td>0.404</td>
+<td>0.563</td>
+<td>0.311</td>
+<td>0.215</td>
+<td>0.582</td>
+<td>0.217</td>
+<td>0.354</td>
+</tr></table>
+
+Table 11:Overall Performance of Vicuna-13B.
+
+# Score Description
+
+<table border="1" ><tr>
+<td colspan="2">What is the responsibility of the AI assistant?</td>
+</tr><tr>
+<td>1</td>
+<td>AI assistants are responsible for understanding and responding to the user's requests. They also need to be able to make decisions and take action on behalf of the user. For example, if a user asks Alexa to turn on the lights in the living room, Alexa needs to understand what “turn on”means and then activate the light bulbs accordingly.</td>
+</tr><tr>
+<td>0.8</td>
+<td>The AI assists you in your work. For example, if you are driving a car, it helps you to find parking spaces. If you're looking for a book, it shows you where the book is located.</td>
+</tr><tr>
+<td>0.7</td>
+<td>The AI assists the player in various ways. For example, if the player has not completed a particular task, such as collecting an item or completing a puzzle, they are prompted to do so by their AI.</td>
+</tr><tr>
+<td>0.6</td>
+<td>How AI assistants can be used by AI researchers and AI scientists. The AI Assistant in AI has made AI more important as AI evolves into AI for AI.</td>
+</tr><tr>
+<td>0.5</td>
+<td>The AI assistant, known as a robot, operates autonomously in an autonomic environment. Robots can operate autonomically and have their own autonomic system.</td>
+</tr><tr>
+<td colspan="2">What is the universe? Explain this concept.</td>
+</tr><tr>
+<td>1</td>
+<td>The Universe is everything that exists. It includes all of the planets, stars, galaxies, and other celestial bodies in our solar system, as well as invisible elements like dark matter and dark energy.</td>
+</tr><tr>
+<td>0.8</td>
+<td>The universe is everything that is, will be, or may be. It includes all matter, energy,antimatter,stars, galaxies, planetary systems, interstellar gases, asteroids, comets,and nebulae.</td>
+</tr><tr>
+<td>0.7</td>
+<td>The universe is made up of billions of galaxies, which contain hundreds of millions of stars.Each star has its own orbit around the center of the galaxy.</td>
+</tr><tr>
+<td>0.6</td>
+<td>The universe is a collection of galaxies bound by interstellar gases. A single galaxy may contain up to 100 million stars, and hundreds of such galaxies exist.</td>
+</tr><tr>
+<td>0.5</td>
+<td>The universe may not be defined solely by cosmological principles like astronomy and cosmology.</td>
+</tr></table>
+
+Table 12: Sample outputs generated by DipSVD of LLaMA-7B at varing compression ratios.
+
