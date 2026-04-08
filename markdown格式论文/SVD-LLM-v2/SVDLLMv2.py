@@ -3,6 +3,12 @@ import os
 print(f"CUDA_VISIBLE_DEVICES: {os.environ.get('CUDA_VISIBLE_DEVICES')}")
 import sys
 import argparse
+from datetime import datetime
+
+current_path = os.path.dirname(os.path.abspath(__file__))
+parent_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(current_path)
+
 import torch.jit
 from tqdm import tqdm
 import torch
@@ -12,12 +18,7 @@ from component.svd_llama import SVD_LlamaAttention, SVD_LlamaMLP
 from component.svd_mistral import SVD_MistralAttention, SVD_MistralMLP
 from component.svd_opt import SVDOPTDecoderLayer
 from utils.model_utils import *
-from evaluater import * 
-from datetime import datetime
-
-current_path = os.path.dirname(os.path.abspath(__file__))
-parent_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.append(current_path)
+from evaluater import *
 
 @torch.no_grad() # 关闭梯度计算
 def profle_svdllm(name, model, calib_loader, dev):
